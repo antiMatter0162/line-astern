@@ -1,4 +1,3 @@
-// ---- Warship RTS: Basic Starter ----
 // Controls:
 //   Left-click a ship (or drag a box over ships) to select them
 //   Right-click on the ocean to move selected ships there
