@@ -1,0 +1,12 @@
+{
+  "name": "warship-rts",
+  "version": "1.0.0",
+  "description": "A small real-time strategy game about commanding warships.",
+  "main": "electron-main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^38.1.0"
+  }
+}
