@@ -726,7 +726,7 @@ function calculatePredictedPath(ship) {
   const points = [];
   const predictionStep = 1 / 12;
  
-  for (let index = 0; state.target; index += 1) {
+  for (let index = 0; state.target && index < 12000; index += 1) {
     const distance = Phaser.Math.Distance.Between(state.sprite.x, state.sprite.y, state.target.x, state.target.y);
     const finalWaypoint = state.waypoints.length === 0;
  
