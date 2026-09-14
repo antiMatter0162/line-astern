@@ -2,18 +2,22 @@ const { app, BrowserWindow } = require("electron");
 const path = require("node:path");
 
 function createWindow() {
-  const window = new BrowserWindow({
-    width: 1024,
-    height: 640,
-    minWidth: 800,
-    minHeight: 500,
-    autoHideMenuBar: true,
-    backgroundColor: "#0b1a2b",
-    webPreferences: {
-      contextIsolation: true,
-      nodeIntegration: false,
-    },
-  });
+const window = new BrowserWindow({
+  width: 1024,
+  height: 640,
+  minWidth: 800,
+  minHeight: 500,
+  useContentSize: true,
+  autoHideMenuBar: true,
+  backgroundColor: "#0b1a2b",
+  webPreferences: {
+    contextIsolation: true,
+    nodeIntegration: false,
+  },
+});
+
+window.setAspectRatio(16 / 10);
+
 
   window.loadFile(path.join(__dirname, "index.html"));
 }
