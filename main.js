@@ -123,7 +123,8 @@ function create() {
   });
  
   // Create a small starting fleet
-  ships = [createShip(this, 6400, 4000)];
+  ships = [createShip(this, 6400, 4000),
+          createShip(this,5400, 4000)];
  
   // Speed order shortcuts: 1=Ahead 1/3 ... 5=Ahead Flank
   SPEED_ORDERS.forEach((order, index) => {
@@ -131,8 +132,7 @@ function create() {
   });
   createSpeedHud(this);
   updateSpeedHud();
- 
-  // Drag-select box
+  
   this.input.on("pointerdown", (pointer) => {
     if (pointer.middleButtonDown()) {
       panStart = { x: pointer.x, y: pointer.y };
@@ -145,63 +145,61 @@ function create() {
       issueMoveOrder(pointer.worldX, pointer.worldY, Boolean(pointer.event && pointer.event.shiftKey));
       return;
     }
-    selectStart = { x: pointer.worldX, y: pointer.worldY };
-    selectionBox = this.add.rectangle(selectStart.x, selectStart.y, 1, 1, 0x00ff00, 0.15)
-      .setStrokeStyle(1, 0x00ff00)
-      .setOrigin(0, 0);
-    worldContainer.add(selectionBox);
+
+    const shiftHeld = Boolean(pointer.event && pointer.event.shiftKey);
+
+    // Find the ship under the click, if any (closest one wins if overlapping)
+    let clickedShip = null;
+    let clickedDist = Infinity;
+    ships.forEach((ship) => {
+      const dist = Phaser.Math.Distance.Between(pointer.worldX, pointer.worldY, ship.sprite.x, ship.sprite.y);
+      if (dist < 20 && dist < clickedDist) {
+        clickedShip = ship;
+        clickedDist = dist;
+      }
+    });
+
+    if (shiftHeld) {
+      // Multi-select: toggle the clicked ship in/out of the existing selection
+      if (clickedShip) {
+        const idx = selectedShips.indexOf(clickedShip);
+        if (idx === -1) {
+          clickedShip.selectedRing.setVisible(true);
+          selectedShips.push(clickedShip);
+        } else {
+          clickedShip.selectedRing.setVisible(false);
+          selectedShips.splice(idx, 1);
+        }
+      }
+      // Shift-click on empty space: leave current selection untouched
+    } else {
+      // Single select: clear existing selection, then select the clicked ship (if any)
+      selectedShips.forEach((s) => s.selectedRing.setVisible(false));
+      selectedShips = [];
+      if (clickedShip) {
+        clickedShip.selectedRing.setVisible(true);
+        selectedShips.push(clickedShip);
+      }
+    }
+
+    updateSpeedHud();
   });
- 
+
   this.input.on("pointermove", (pointer) => {
     if (panStart) {
       const camera = this.cameras.main;
       camera.scrollX -= (pointer.x - panStart.x) / camera.zoom;
       camera.scrollY -= (pointer.y - panStart.y) / camera.zoom;
       panStart = { x: pointer.x, y: pointer.y };
-      return;
     }
-    if (!selectionBox || !selectStart) return;
-    const w = pointer.worldX - selectStart.x;
-    const h = pointer.worldY - selectStart.y;
-    selectionBox.setSize(Math.abs(w), Math.abs(h));
-    selectionBox.x = w < 0 ? pointer.worldX : selectStart.x;
-    selectionBox.y = h < 0 ? pointer.worldY : selectStart.y;
   });
- 
-  // Finalize the drag-select box on pointerup, or pointerupoutside if the mouse
-  // is released outside the canvas — without this, releasing off-canvas would
-  // leave selectionBox/selectStart dangling and break the next drag.
+
   const finishSelection = (pointer) => {
     if (panStart) {
       panStart = null;
-      return;
     }
-    if (!selectionBox) return;
- 
-    const bounds = selectionBox.getBounds();
-    const clickedOnly = bounds.width < 4 && bounds.height < 4;
- 
-    selectedShips.forEach((s) => s.selectedRing.setVisible(false));
-    selectedShips = [];
- 
-    ships.forEach((ship) => {
-      const inBox = bounds.contains(ship.sprite.x, ship.sprite.y);
-      const clickedOnShip =
-        clickedOnly &&
-        Phaser.Math.Distance.Between(pointer.worldX, pointer.worldY, ship.sprite.x, ship.sprite.y) < 20;
- 
-      if (inBox || clickedOnShip) {
-        ship.selectedRing.setVisible(true);
-        selectedShips.push(ship);
-      }
-    });
- 
-    selectionBox.destroy();
-    selectionBox = null;
-    selectStart = null;
-    updateSpeedHud();
   };
- 
+
   this.input.on("pointerup", finishSelection);
   this.input.on("pointerupoutside", finishSelection);
  
@@ -222,7 +220,7 @@ function createShip(scene, x, y) {
     .setDepth(2);
  
   const selectedRing = scene.add.image(x, y, "selection-circle")
-    .setDisplaySize(104, 104)
+    .setDisplaySize(120, 120)
     .setDepth(3);
   selectedRing.setVisible(false);
  
@@ -241,12 +239,53 @@ function createShip(scene, x, y) {
     accelerationFrameClock: 0,
     slowdownFrameClock: 0,
     speed: 0,
-    maxSpeed: 90, // px/sec at Ahead Flank (100%) — the ship's absolute top speed
-    acceleration: 108, // px/sec^2; matches ten reverse slowdown frames at 12 FPS
-    deceleration: 108, // px/sec^2; matches ten slowdown frames at 12 FPS from max speed
-    turnRate: Phaser.Math.DegToRad(20), // radians/sec
+    maxSpeed: 90,
+    acceleration: 108,
+    deceleration: 108,
+    braking: false, //handles cases where the ship almost stops, but decides to move again in a circle to re-reach the waypoint
+    turnRate: Phaser.Math.DegToRad(20),
     speedOrderIndex: DEFAULT_SPEED_ORDER_INDEX,
+    collisionRadius: 28,
+    team: "player", // future: "enemy" ships won't be avoided, only rammed
   };
+}
+
+function computeAvoidanceSteering(ship) {
+  let pushX = 0;
+  let pushY = 0;
+
+  // React earlier the faster you're going — gives the turn rate time to work
+  const reactionTime = 2.5; // seconds of buffer
+  const lookahead = ship.collisionRadius * 3 + ship.speed * reactionTime;
+
+  ships.forEach((other) => {
+    if (other === ship) return;
+    if (other.team !== ship.team) return;
+
+    const dx = ship.sprite.x - other.sprite.x;
+    const dy = ship.sprite.y - other.sprite.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    const safeDist = ship.collisionRadius + other.collisionRadius + lookahead;
+
+    if (dist <= 0 || dist >= safeDist) return;
+
+    const strength = (safeDist - dist) / safeDist; // 0 (far) → 1 (touching)
+
+    // Direct push straight away from the other ship
+    const awayX = dx / dist;
+    const awayY = dy / dist;
+
+    // Perpendicular ("always break right") component — this is what breaks
+    // the head-on tie so both ships reliably pick the same side to dodge to,
+    // instead of both wobbling between left/right unpredictably
+    const rightX = -dy / dist;
+    const rightY = dx / dist;
+
+    pushX += awayX * strength * 0.6 + rightX * strength * 0.8;
+    pushY += awayY * strength * 0.6 + rightY * strength * 0.8;
+  });
+
+  return { x: pushX, y: pushY };
 }
  
 function isPointerOverSpeedHud(pointer) {
@@ -348,6 +387,7 @@ function updateSpeedHud() {
  
 function issueMoveOrder(x, y, append) {
   if (selectedShips.length === 0) return;
+  
  
   const scene = selectedShips[0].sprite.scene;
  
@@ -360,7 +400,8 @@ function issueMoveOrder(x, y, append) {
       ship.waypoints.forEach(removeWaypointMarker);
       ship.waypoints = [];
       ship.target = null;
- 
+      ship.braking = false;
+
       if (ship.slowingDown && ship.speed > 0) {
         ship.slowingDown = false;
         ship.accelerating = false;
@@ -540,44 +581,55 @@ function updateShip(ship, dt) {
   }
   syncShipAnimationFrame(ship);
  
-  if (ship.target) {
+   if (ship.target) {
     const dist = Phaser.Math.Distance.Between(sprite.x, sprite.y, ship.target.x, ship.target.y);
     const stoppingDistance = (ship.speed * ship.speed) / (2 * ship.deceleration);
     const finalWaypoint = ship.waypoints.length === 0;
- 
+
     if (!finalWaypoint && dist >= waypointReachLeeway && shouldAdvanceForTurn(ship)) {
       advanceWaypointForTurn(ship);
     }
- 
-    // Once within braking distance of the final waypoint, the ship commits to
-    // stopping there regardless of its current speed order — stopping is
-    // stopping, not just "slow down to 1/3".
-    const mustBrakeToStop = finalWaypoint && dist <= stoppingDistance;
+
     const commandedSpeed = getCommandedSpeed(ship);
- 
+
+    // Latch: once triggered, braking stays true for the rest of this approach,
+    // even if distance/stoppingDistance would momentarily say otherwise.
+    if (finalWaypoint && dist <= stoppingDistance) {
+      ship.braking = true;
+    }
+
     if (dist <= waypointReachLeeway) {
       completeWaypoint(ship);
-    } else if (mustBrakeToStop) {
-      if (!ship.slowingDown) startSlowdownAnimation(ship);
-      ship.speed = Math.max(0, ship.speed - ship.deceleration * dt);
- 
-      // Discrete-time deceleration can zero out speed a few pixels short of
-      // the exact waypoint position (waypointReachLeeway is 0), which would
-      // otherwise leave the ship stalled forever with a target it can never
-      // technically "reach". Treat hitting zero speed during final approach
-      // as arrival and snap/complete instead of waiting for dist === 0.
-      if (ship.speed <= 0) {
-        completeWaypoint(ship);
-      }
-    } else {
+    } else if (ship.braking) {
+        if (!ship.slowingDown) startSlowdownAnimation(ship);
+        ship.speed = Math.max(0, ship.speed - ship.deceleration * dt);
+
+        if (ship.speed <= 0) {
+          completeWaypoint(ship, false); // stopped short — stay where it actually is, don't snap
+        }
+      } else {
       // Still under way toward the waypoint: steer as normal, and throttle
       // speed up or down toward whatever the current speed order calls for.
       const steeringTarget = getSteeringTarget(ship);
-      const desiredAngle = Phaser.Math.Angle.Between(sprite.x, sprite.y, steeringTarget.x, steeringTarget.y) + Math.PI / 2;
+      let dirX = steeringTarget.x - sprite.x;
+      let dirY = steeringTarget.y - sprite.y;
+
+      // Normalize so avoidance strength doesn't get drowned out when the
+      // steering target is far away
+      const dirLen = Math.sqrt(dirX * dirX + dirY * dirY) || 1;
+      dirX /= dirLen;
+      dirY /= dirLen;
+
+      const avoidance = computeAvoidanceSteering(ship);
+      const avoidanceWeight = 1.5;
+      dirX += avoidance.x * avoidanceWeight;
+      dirY += avoidance.y * avoidanceWeight;
+
+      const desiredAngle = Math.atan2(dirY, dirX) + Math.PI / 2;
       const angleDelta = Phaser.Math.Angle.Wrap(desiredAngle - sprite.rotation);
       const maxTurn = ship.turnRate * dt;
       sprite.rotation += Phaser.Math.Clamp(angleDelta, -maxTurn, maxTurn);
- 
+
       if (ship.speed < commandedSpeed) {
         ship.speed = Math.min(commandedSpeed, ship.speed + ship.acceleration * dt);
         if (!ship.moving || ship.slowingDown) {
@@ -590,7 +642,6 @@ function updateShip(ship, dt) {
         if (!ship.slowingDown) startSlowdownAnimation(ship);
         ship.speed = Math.max(commandedSpeed, ship.speed - ship.deceleration * dt);
         if (ship.speed <= commandedSpeed) {
-          // Reached the newly-commanded cruise speed — resume steady cruising visuals.
           ship.slowingDown = false;
           ship.sprite.stop();
           ship.sprite.play("ship-moving");
@@ -644,14 +695,17 @@ function stopShipAnimation(ship) {
   ship.sprite.setDisplaySize(shipDisplayWidth, shipDisplayHeight);
 }
  
-function completeWaypoint(ship) {
+function completeWaypoint(ship, snap = true) {
   const completedWaypoint = ship.target;
-  ship.sprite.setPosition(completedWaypoint.x, completedWaypoint.y);
+  if (snap) {
+    ship.sprite.setPosition(completedWaypoint.x, completedWaypoint.y);
+  }
   advanceToNextWaypoint(ship);
- 
+  ship.braking = false;
+
   if (ship.target) updatePathLine(ship);
   removeWaypointMarker(completedWaypoint);
- 
+
   if (!ship.target) {
     ship.speed = 0;
     stopShipAnimation(ship);
