@@ -40,6 +40,28 @@ const turnWindowLeeway = 3;
 const shipDisplayWidth = 56;
 const shipDisplayHeight = 130;
 
+// ---- Turret mounts ----
+// Local offsets are in "unrotated ship space" (same axes as the hull texture:
+// +y toward the stern, matching ship.sprite.rotation === 0, i.e. bow facing
+// up). Derived from the anchor-point reference image: the bow pair (A, B)
+// have their barrels pointing toward the bow, so their sprites start rotated
+// 180° from the native art (which has barrels pointing "down"); the stern
+// pair (B, A) keep the native 0° rotation since their barrels already point
+// the right way (toward the stern).
+//
+// Order is bow -> stern: A, B, B, A. B mounts get a higher depth than A
+// mounts so the (inner, superfiring) B turrets always render on top of the
+// (outer) A turrets they overlap.
+const TURRET_MOUNTS = [
+  { type: "A", dx: 0, dy: -38, baseRotation: Math.PI }, // bow-most
+  { type: "B", dx: 0, dy: -22, baseRotation: Math.PI }, // bow, superfiring
+  { type: "B", dx: 0, dy: 28, baseRotation: 0 }, // stern, superfiring
+  { type: "A", dx: 0, dy: 43, baseRotation: 0 }, // stern-most
+];
+const turretDisplaySize = 21;
+const TURRET_DEPTH = { A: 2.4, B: 2.6 };
+const TURRET_TEXTURE_KEY = { A: "turret-a", B: "turret-b" };
+
 // Naval "bell order" style speed settings, each a fraction of a ship's
 // absolute top (flank) speed. Ships steer/cruise capped at whichever order
 // is currently in effect; braking to a full stop at a final waypoint always
@@ -61,6 +83,8 @@ function preload() {
   this.load.image("ship-stationary", "assets/Pennyslvania-Class Blank.png");
   this.load.image("selection-circle", "assets/Selection-Circle.png");
   this.load.image("waypoint", "assets/Waypoint.png");
+  this.load.image("turret-a", "assets/Pennsylvania Turret A.png");
+  this.load.image("turret-b", "assets/Pennsylvania Turret B.png");
   this.load.spritesheet("ship", "assets/Pennyslvania-Class.png", {
     frameWidth: 960,
     frameHeight: 2220,
@@ -218,6 +242,8 @@ function createShip(scene, x, y) {
   const sprite = scene.add.sprite(x, y, "ship-stationary")
     .setDisplaySize(shipDisplayWidth, shipDisplayHeight)
     .setDepth(2);
+
+  const turrets = createTurrets(scene, x, y);
  
   const selectedRing = scene.add.image(x, y, "selection-circle")
     .setDisplaySize(120, 120)
@@ -228,6 +254,7 @@ function createShip(scene, x, y) {
  
   return {
     sprite,
+    turrets,
     selectedRing,
     target: null,
     waypoints: [],
@@ -248,6 +275,51 @@ function createShip(scene, x, y) {
     collisionRadius: 28,
     team: "player", // future: "enemy" ships won't be avoided, only rammed
   };
+}
+
+// Builds the four turret sprites for a ship, anchored per TURRET_MOUNTS.
+// Each turret tracks its own local offset and a fixed base rotation; see
+// updateTurrets() for how those are combined with the hull's rotation every
+// frame.
+function createTurrets(scene, shipX, shipY) {
+  return TURRET_MOUNTS.map((mount) => {
+    const sprite = scene.add.sprite(shipX, shipY, TURRET_TEXTURE_KEY[mount.type])
+      .setDisplaySize(turretDisplaySize, turretDisplaySize)
+      .setDepth(TURRET_DEPTH[mount.type])
+      .setRotation(mount.baseRotation);
+    worldContainer.add(sprite);
+    return {
+      sprite,
+      dx: mount.dx,
+      dy: mount.dy,
+      // Fixed offset from the ship's own heading — NOT an absolute world
+      // angle. Every frame this gets added to the ship's current rotation,
+      // which is what makes the turret preserve its orientation relative to
+      // the ship (rigidly attached, like it's welded to the deck) as the
+      // hull turns. Once turrets become independently aimable, this is the
+      // field a future aiming system would add an extra offset on top of.
+      rotationOffset: mount.baseRotation,
+    };
+  });
+}
+
+// Repositions and reorients a ship's turrets to follow the hull: each
+// turret's fixed local offset is rotated by the ship's current heading to
+// get a world-space offset, which is added to the ship's position, and the
+// turret sprite's own rotation is set to the ship's rotation plus the
+// turret's fixed rotationOffset — so the turret stays rigidly attached to
+// the ship (constant bearing relative to the hull) rather than holding a
+// fixed absolute world angle.
+function updateTurrets(ship) {
+  const cos = Math.cos(ship.sprite.rotation);
+  const sin = Math.sin(ship.sprite.rotation);
+  ship.turrets.forEach((turret) => {
+    const worldOffsetX = turret.dx * cos - turret.dy * sin;
+    const worldOffsetY = turret.dx * sin + turret.dy * cos;
+    turret.sprite.x = ship.sprite.x + worldOffsetX;
+    turret.sprite.y = ship.sprite.y + worldOffsetY;
+    turret.sprite.rotation = ship.sprite.rotation + turret.rotationOffset;
+  });
 }
 
 function computeAvoidanceSteering(ship) {
@@ -683,6 +755,8 @@ function updateShip(ship, dt) {
  
   ship.selectedRing.x = sprite.x;
   ship.selectedRing.y = sprite.y;
+
+  updateTurrets(ship);
 }
  
 function stopShipAnimation(ship) {
