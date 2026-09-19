@@ -69,6 +69,7 @@ const DISPERSION_CURVE = {
   vertical: { base: 3, coefficient: 0.04, exponent: 0.85 },
   horizontal: { base: 6, coefficient: 0.075, exponent: 0.95 },
 };
+const DISPERSION_SIGMA = 1.8;
 
 // ---- Firing mode ----
 let firingModeActive = false;
@@ -534,7 +535,11 @@ function getDispersionForRange(distance) {
 // the given range fired from a ship with the given heading.
 function getDispersionOffset(distance, shipRotation) {
   const { vertical, horizontal } = getDispersionForRange(distance);
-  const centeredRandom = () => Math.random() + Math.random() - 1; // range (-1, 1), peaked at 0
+  const centeredRandom = (sigma = DISPERSION_SIGMA) => {
+    const base = Math.random() + Math.random() - 1;
+    const sign = Math.sign(base) || 1;
+    return sign * Math.pow(Math.abs(base), sigma);
+  };
 
   const localX = centeredRandom() * vertical;
   const localY = centeredRandom() * horizontal;
