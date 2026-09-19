@@ -42,7 +42,6 @@ let ships = [];
 let selectedShips = [];
 let panStart = null;
 let waypointMarkers = [];
-let dispersionEllipse = null;
 const waypointSize = 48;
 const waypointSourceSize = 480;
 const waypointReachLeeway = 0;
@@ -51,29 +50,26 @@ const shipDisplayWidth = 56;
 const shipDisplayHeight = 130;
 
 // ---- Turret mounts ----
-// Local offsets are in "unrotated ship space" (same axes as the hull texture:
-// +y toward the stern, matching ship.sprite.rotation === 0, i.e. bow facing
-// up). Derived from the anchor-point reference image: the bow pair (A, B)
-// have their barrels pointing toward the bow, so their sprites start rotated
-// 180° from the native art (which has barrels pointing "down"); the stern
-// pair (B, A) keep the native 0° rotation since their barrels already point
-// the right way (toward the stern).
-//
-// Order is bow -> stern: A, B, B, A. B mounts get a higher depth than A
-// mounts so the (inner, superfiring) B turrets always render on top of the
-// (outer) A turrets they overlap.
 const TURRET_MOUNTS = [
   { type: "A", dx: 0, dy: -35, baseRotation: Math.PI }, // bow-most
   { type: "B", dx: 0, dy: -20, baseRotation: Math.PI }, // bow, superfiring
   { type: "B", dx: 0, dy: 23.5, baseRotation: 0 }, // stern, superfiring
-  { type: "A", dx: 0, dy: 37, baseRotation: 0 }, // stern-most
+  { type: "A", dx: 0, dy: 38, baseRotation: 0 }, // stern-most
 ];
 const turretDisplaySize = 21;
 const TURRET_DEPTH = { A: 2.4, B: 2.6 };
 const TURRET_TEXTURE_KEY = { A: "turret-a", B: "turret-b" };
 const TURRET_TRAVERSE = Phaser.Math.DegToRad(0.15);
-const DISPERSION_SEMI_MAJOR = 40;
-const DISPERSION_SEMI_MINOR = 20;
+const MIN_FIRING_DISTANCE = 150;
+
+// ---- Dispersion model ----
+// Vertical - Across beam line
+//Horizontal - Perpendicular to beam line
+const DISPERSION_CURVE = {
+  vertical: { base: 3, coefficient: 0.04, exponent: 0.85 },
+  horizontal: { base: 6, coefficient: 0.075, exponent: 0.95 },
+};
+
 // ---- Firing mode ----
 let firingModeActive = false;
 let firingModeIndicator = null;
@@ -125,6 +121,22 @@ function preload() {
     frameWidth: 960,
     frameHeight: 2220,
   });
+}
+
+let cannotAimMessage = null;
+
+function createCannotAimHud(scene) {
+  cannotAimMessage = scene.add.text(
+    config.width / 2, 60, "Cannot aim there!",
+    { fontSize: "20px", color: "#ffffff", backgroundColor: "#7a1010", padding: { x: 14, y: 8 } },
+  ).setOrigin(0.5, 0).setDepth(10).setVisible(false);
+  scene.cameras.main.ignore(cannotAimMessage);
+}
+
+function flashCannotAimMessage(scene) {
+  if (!cannotAimMessage) return;
+  cannotAimMessage.setVisible(true);
+  scene.time.delayedCall(900, () => cannotAimMessage.setVisible(false));
 }
  
 function create() {
@@ -188,8 +200,8 @@ function create() {
   });
   createSpeedHud(this);
   updateSpeedHud();
-
   createFiringHud(this);
+  createCannotAimHud(this);
   this.input.keyboard.on("keydown-F", toggleFiringMode);
   this.input.keyboard.on("keydown-X", stopFiring);
   
@@ -247,6 +259,7 @@ function create() {
     }
 
     updateSpeedHud();
+    updateDispersionEllipseVisibility();
   });
 
   this.input.on("pointermove", (pointer) => {
@@ -290,13 +303,18 @@ function createShip(scene, x, y) {
     .setDisplaySize(120, 120)
     .setDepth(3);
   selectedRing.setVisible(false);
+  
+  const minRangeCircle = drawPixelatedCircleOutline(scene, MIN_FIRING_DISTANCE)
+    .setDepth(1)
+    .setVisible(false);
  
-  worldContainer.add([sprite, selectedRing]);
+  worldContainer.add([sprite, selectedRing, minRangeCircle]);
  
   return {
     sprite,
     turrets,
     selectedRing,
+    minRangeCircle,
     target: null,
     waypoints: [],
     pathPreviewLastUpdate: -Infinity,
@@ -316,7 +334,8 @@ function createShip(scene, x, y) {
     collisionRadius: 28,
     team: "player", // future: "enemy" ships won't be avoided, only rammed
     fireTarget: null,
-    
+    dispersionEllipse: null,
+    dispersionEllipseRangeAtBuild: null,
   };
 }
 
@@ -421,7 +440,7 @@ function createFiringHud(scene) {
 function setFiringMode(active) {
   firingModeActive = active;
   if (firingModeIndicator) firingModeIndicator.setVisible(firingModeActive);
-  // No longer clears ship.fireTarget here. Toggling F just switches what
+  // Doesn't touch any ship's fireTarget. Toggling F just switches what
   // right-click does (fire vs move) and shows/hides the targeting HUD —
   // it has no effect on any fire order already in progress. Only
   // stopFiring() (bound to X) cancels an active fire order.
@@ -431,52 +450,40 @@ function toggleFiringMode() {
   setFiringMode(!firingModeActive);
 }
 
-// Cancels the fire order for the currently selected ships. This is now the
-// ONLY way to stop a ship from firing — pressing F just hides/shows the
-// firing-mode UI and doesn't touch fireTarget at all.
+// Cancels the fire order for the currently selected ships and tears down
+// each of their dispersion ellipses. This is the ONLY way to stop a ship
+// from firing — pressing F just hides/shows the firing-mode UI.
 function stopFiring() {
   if (selectedShips.length === 0) return;
 
   selectedShips.forEach((ship) => {
     ship.fireTarget = null;
+    if (ship.dispersionEllipse) {
+      ship.dispersionEllipse.destroy();
+      ship.dispersionEllipse = null;
+    }
   });
-
-  // The dispersion ellipse is a single shared visual (not per-ship), so only
-  // tear it down once nothing is left firing at all — otherwise a ship
-  // outside the current selection that's still firing would lose its
-  // target reticle even though it's still shooting.
-  const anyShipStillFiring = ships.some((ship) => ship.fireTarget);
-  if (!anyShipStillFiring && dispersionEllipse) {
-    dispersionEllipse.destroy();
-    dispersionEllipse = null;
-  }
 }
 
 function issueFireOrder(x, y) {
   if (selectedShips.length === 0) return;
 
   selectedShips.forEach((ship) => {
+    const distanceFromShip = Phaser.Math.Distance.Between(ship.sprite.x, ship.sprite.y, x, y);
+    if (distanceFromShip < MIN_FIRING_DISTANCE) {
+      flashCannotAimMessage(ship.sprite.scene);
+      return; // leaves ship.fireTarget (and its dispersion ellipse) exactly as it was
+    }
+
     if (ship.fireTarget && Phaser.Math.Distance.Between(ship.fireTarget.x, ship.fireTarget.y, x, y) <= FIRE_TARGET_TOGGLE_RADIUS) {
       ship.fireTarget = null;
-
-      if (dispersionEllipse) {
-        dispersionEllipse.destroy();
-        dispersionEllipse = null;
+      if (ship.dispersionEllipse) {
+        ship.dispersionEllipse.destroy();
+        ship.dispersionEllipse = null;
       }
     } else {
       ship.fireTarget = { x, y };
-
-      if (dispersionEllipse) {
-        dispersionEllipse.destroy();
-      }
-
-      dispersionEllipse = createDispersionEllipse(
-        ship.sprite.scene,
-        x,
-        y,
-        DISPERSION_SEMI_MAJOR,
-        DISPERSION_SEMI_MINOR
-      );
+      refreshShipDispersionEllipse(ship);
     }
   });
 }
@@ -501,57 +508,175 @@ function fireTurretVolley(ship, turret) {
     const muzzleX = turret.sprite.x + barrel.dx * cos - barrel.dy * sin;
     const muzzleY = turret.sprite.y + barrel.dx * sin + barrel.dy * cos;
     const distance = Phaser.Math.Distance.Between(muzzleX, muzzleY, targetX, targetY);
-    const dispersion = getDispersionOffset(distance);
+    const dispersion = getDispersionOffset(distance, getShipTargetBearing(ship));
     spawnShell(scene, muzzleX, muzzleY, targetX + dispersion.x, targetY + dispersion.y);
   });
 }
 
-// Future dispersion hook — always zero for now.
-function getDispersionOffset(distance) {
-  return { x: 0, y: 0 };
+function getShipTargetBearing(ship) {
+  if (!ship.fireTarget) return ship.sprite.rotation;
+  return Phaser.Math.Angle.Between(
+    ship.sprite.x, ship.sprite.y, ship.fireTarget.x, ship.fireTarget.y
+  );
 }
 
-function createDispersionEllipse(scene, x, y, semiMajor, semiMinor) {
+// Returns the dispersion ellipse's semi-axes (world units)
+function getDispersionForRange(distance) {
+  const applyCurve = ({ base, coefficient, exponent }) =>
+    base + coefficient * Math.pow(distance, exponent);
+  return {
+    vertical: applyCurve(DISPERSION_CURVE.vertical),
+    horizontal: applyCurve(DISPERSION_CURVE.horizontal),
+  };
+}
+
+// Samples one random point-of-impact offset, in WORLD space, for a shot at
+// the given range fired from a ship with the given heading.
+function getDispersionOffset(distance, shipRotation) {
+  const { vertical, horizontal } = getDispersionForRange(distance);
+  const centeredRandom = () => Math.random() + Math.random() - 1; // range (-1, 1), peaked at 0
+
+  const localX = centeredRandom() * vertical;
+  const localY = centeredRandom() * horizontal;
+
+  const cos = Math.cos(shipRotation);
+  const sin = Math.sin(shipRotation);
+  return {
+    x: localX * cos - localY * sin,
+    y: localX * sin + localY * cos,
+  };
+}
+// Draws a pixelated circle OUTLINE (no fill) in LOCAL coordinates centered
+// on (0,0) — same blocky quantize-to-grid technique as the dispersion
+// ellipse outline (see drawDispersionEllipseGraphics), just with equal
+// horizontal/vertical radii. `pixel` controls the chunkiness of the blocks;
+// bigger pixel = chunkier/more pixelated, smaller = smoother.
+function drawPixelatedCircleOutline(scene, radius, color = 0xff4444, pixel = 2) {
+  const graphics = scene.add.graphics();
+  const half = pixel / 2;
+  const cell = (px, py) => graphics.fillRect(px - half, py - half, pixel, pixel);
+
+  graphics.fillStyle(color, 0.9);
+  for (let angle = 0; angle <= Math.PI / 2; angle += 0.01) {
+    const px = Math.round((Math.cos(angle) * radius) / pixel) * pixel;
+    const py = Math.round((Math.sin(angle) * radius) / pixel) * pixel;
+    [1, -1].forEach((sx) => {
+      [1, -1].forEach((sy) => {
+        cell(sx * px, sy * py);
+      });
+    });
+  }
+
+  return graphics;
+}
+
+// Draws a dispersion ellipse (fill + outline + axis ticks) in LOCAL
+// coordinates centered on (0,0) — it is NOT positioned or rotated here.
+// The caller uses the returned graphics object's own setPosition()/
+// setRotation() to place and orient it, which lets it track a turning ship
+// every frame via Phaser's transform instead of re-drawing every fillRect
+// each time (see updateDispersionEllipseTransform).
+function drawDispersionEllipseGraphics(scene, semiMajor, semiMinor) {
   const graphics = scene.add.graphics();
   const pixel = 2;
   const half = pixel / 2;
   graphics.setDepth(1.5);
-  
-  const cx = x;
-  const cy = y;
 
   const cell = (px, py) => graphics.fillRect(px - half, py - half, pixel, pixel);
 
-  // Semi-transparent red fill
+  // Semi-transparent fill
   graphics.fillStyle(0xff0000, 0.18);
   for (let py = -semiMinor; py <= semiMinor; py += pixel) {
     const normalizedY = py / semiMinor;
     const halfWidth = semiMajor * Math.sqrt(Math.max(0, 1 - normalizedY * normalizedY));
     const halfWidthPixels = Math.round(halfWidth / pixel) * pixel;
-    graphics.fillRect(cx - halfWidthPixels, cy + py - half, halfWidthPixels * 2, pixel);
+    graphics.fillRect(-halfWidthPixels, py - half, halfWidthPixels * 2, pixel);
   }
 
-  // Ellipse outline — one quadrant, mirrored into the other three.
+  // Outline — one quadrant, mirrored into the other three.
   graphics.fillStyle(0xff0000, 0.9);
   for (let angle = 0; angle <= Math.PI / 2; angle += 0.01) {
     const px = Math.round((Math.cos(angle) * semiMajor) / pixel) * pixel;
     const py = Math.round((Math.sin(angle) * semiMinor) / pixel) * pixel;
     [1, -1].forEach((sx) => {
       [1, -1].forEach((sy) => {
-        cell(cx + sx * px, cy + sy * py);
+        cell(sx * px, sy * py);
       });
     });
   }
 
-  // Tick marks at the ends of each axis
+  // Axis ticks
   const tickLength = Math.round(Math.min(semiMajor, semiMinor) * 0.5);
-  graphics.fillRect(cx - semiMajor, cy - half, tickLength, pixel);
-  graphics.fillRect(cx + semiMajor - tickLength, cy - half, tickLength, pixel);
-  graphics.fillRect(cx - half, cy - semiMinor, pixel, tickLength);
-  graphics.fillRect(cx - half, cy + semiMinor - tickLength, pixel, tickLength);
+  graphics.fillRect(-semiMajor, -half, tickLength, pixel);
+  graphics.fillRect(semiMajor - tickLength, -half, tickLength, pixel);
+  graphics.fillRect(-half, -semiMinor, pixel, tickLength);
+  graphics.fillRect(-half, semiMinor - tickLength, pixel, tickLength);
 
-  worldContainer.add(graphics);
   return graphics;
+}
+
+// (Re)builds a ship's dispersion ellipse sized for its current range to
+// target, and immediately positions/orients it. Called when a fire order is
+// (re)issued, and again from updateDispersionEllipseTransform whenever the
+// ship's range to target has drifted enough to meaningfully change the
+// dispersion size (e.g. the ship maneuvering while continuing to fire at a
+// fixed point).
+function refreshShipDispersionEllipse(ship) {
+  if (!ship.fireTarget) return;
+
+  const scene = ship.sprite.scene;
+  const distance = Phaser.Math.Distance.Between(
+    ship.sprite.x, ship.sprite.y, ship.fireTarget.x, ship.fireTarget.y
+  );
+  const { vertical, horizontal } = getDispersionForRange(distance);
+
+  if (ship.dispersionEllipse) {
+    ship.dispersionEllipse.destroy();
+  }
+
+  ship.dispersionEllipse = drawDispersionEllipseGraphics(scene, vertical, horizontal);
+  ship.dispersionEllipse.setPosition(ship.fireTarget.x, ship.fireTarget.y);
+  ship.dispersionEllipse.setRotation(getShipTargetBearing(ship));
+  ship.dispersionEllipse.setVisible(selectedShips.includes(ship));
+  worldContainer.add(ship.dispersionEllipse);
+  ship.dispersionEllipseRangeAtBuild = distance;
+}
+
+// Called every frame for every ship. Keeps the ellipse's rotation locked to
+// the ship's current heading at all times (so it stays parallel to the ship,
+// not to the world or to the line of fire), and rebuilds its size only when
+// the range has drifted past a small threshold — cheap per-frame work
+// (setRotation) versus an occasional full redraw, rather than redrawing
+// several hundred fillRect calls every single frame.
+function updateDispersionEllipseTransform(ship) {
+  if (!ship.dispersionEllipse) return;
+
+  if (!ship.fireTarget) {
+    ship.dispersionEllipse.destroy();
+    ship.dispersionEllipse = null;
+    return;
+  }
+
+  ship.dispersionEllipse.setRotation(getShipTargetBearing(ship));
+
+  const distance = Phaser.Math.Distance.Between(
+    ship.sprite.x, ship.sprite.y, ship.fireTarget.x, ship.fireTarget.y
+  );
+  if (Math.abs(distance - ship.dispersionEllipseRangeAtBuild) > 5) {
+    refreshShipDispersionEllipse(ship);
+  }
+}
+
+// Syncs every ship's dispersion ellipse visibility to the current
+// selection. Call this any time selectedShips changes — the ellipse itself
+// keeps existing/updating for every firing ship regardless of selection,
+// only its visibility is selection-dependent.
+function updateDispersionEllipseVisibility() {
+  ships.forEach((ship) => {
+    if (ship.dispersionEllipse) {
+      ship.dispersionEllipse.setVisible(selectedShips.includes(ship));
+    }
+  });
 }
 
 function spawnShell(scene, x, y, targetX, targetY) {
@@ -1012,8 +1137,12 @@ function updateShip(ship, dt) {
   ship.selectedRing.x = sprite.x;
   ship.selectedRing.y = sprite.y;
 
+  ship.minRangeCircle.setPosition(sprite.x, sprite.y);
+  ship.minRangeCircle.setVisible(firingModeActive && selectedShips.includes(ship));
+
   updateTurrets(ship);
   updateFiring(ship, dt);
+  updateDispersionEllipseTransform(ship);
 }
  
 function stopShipAnimation(ship) {
