@@ -3,8 +3,19 @@
 //   Right-click on the ocean to move selected ships there
 //   Ships turn and accelerate like real vessels (no instant snapping)
 
+
+window.onerror = function (message, source, lineno, colno, error) {
+  document.body.innerHTML =
+    '<pre style="color:red;background:#fff;padding:20px;font-size:14px;white-space:pre-wrap;">' +
+    'ERROR: ' + message + '\n' +
+    'Line: ' + lineno + ', Col: ' + colno + '\n' +
+    (error && error.stack ? error.stack : '') +
+    '</pre>';
+};
+
+
 const config = {
-  type: Phaser.AUTO,
+  type: Phaser.CANVAS,
 
   width: 1280,
   height: 800,
@@ -28,11 +39,10 @@ const config = {
 new Phaser.Game(config);
 
 let ships = [];
-let selectionBox = null;
-let selectStart = null;
 let selectedShips = [];
 let panStart = null;
 let waypointMarkers = [];
+let dispersionEllipse = null;
 const waypointSize = 48;
 const waypointSourceSize = 480;
 const waypointReachLeeway = 0;
@@ -53,14 +63,35 @@ const shipDisplayHeight = 130;
 // mounts so the (inner, superfiring) B turrets always render on top of the
 // (outer) A turrets they overlap.
 const TURRET_MOUNTS = [
-  { type: "A", dx: 0, dy: -38, baseRotation: Math.PI }, // bow-most
-  { type: "B", dx: 0, dy: -22, baseRotation: Math.PI }, // bow, superfiring
-  { type: "B", dx: 0, dy: 28, baseRotation: 0 }, // stern, superfiring
-  { type: "A", dx: 0, dy: 43, baseRotation: 0 }, // stern-most
+  { type: "A", dx: 0, dy: -35, baseRotation: Math.PI }, // bow-most
+  { type: "B", dx: 0, dy: -20, baseRotation: Math.PI }, // bow, superfiring
+  { type: "B", dx: 0, dy: 23.5, baseRotation: 0 }, // stern, superfiring
+  { type: "A", dx: 0, dy: 37, baseRotation: 0 }, // stern-most
 ];
 const turretDisplaySize = 21;
 const TURRET_DEPTH = { A: 2.4, B: 2.6 };
 const TURRET_TEXTURE_KEY = { A: "turret-a", B: "turret-b" };
+const TURRET_TRAVERSE = Phaser.Math.DegToRad(0.15);
+const DISPERSION_SEMI_MAJOR = 40;
+const DISPERSION_SEMI_MINOR = 20;
+// ---- Firing mode ----
+let firingModeActive = false;
+let firingModeIndicator = null;
+const TURRET_RELOAD_SECONDS = 10;
+const FIRE_TARGET_TOGGLE_RADIUS = 24; // right-clicking within this many world units of the current target cancels it
+
+const BARREL_NATIVE_SPACING = 60;
+const BARREL_NATIVE_MUZZLE_DY = 164;
+const BARREL_LOCAL_OFFSETS = [-1, 0, 1].map((i) => ({
+  dx: i * BARREL_NATIVE_SPACING * (turretDisplaySize / 360),
+  dy: BARREL_NATIVE_MUZZLE_DY * (turretDisplaySize / 360),
+}));
+
+const SHELL_SCALE = (shipDisplayWidth / 960) * 0.5;
+const shellDisplayWidth = 75 * SHELL_SCALE;
+const shellDisplayHeight = 135 * SHELL_SCALE;
+const SHELL_SPEED = 260;
+let activeShells = [];
 
 // Naval "bell order" style speed settings, each a fraction of a ship's
 // absolute top (flank) speed. Ships steer/cruise capped at whichever order
@@ -83,6 +114,7 @@ function preload() {
   this.load.image("ship-stationary", "assets/Pennyslvania-Class Blank.png");
   this.load.image("selection-circle", "assets/Selection-Circle.png");
   this.load.image("waypoint", "assets/Waypoint.png");
+  this.load.image("shell", "assets/Shell.png");
   this.load.image("turret-a", "assets/Pennsylvania Turret A.png");
   this.load.image("turret-b", "assets/Pennsylvania Turret B.png");
   this.load.spritesheet("ship", "assets/Pennyslvania-Class.png", {
@@ -113,7 +145,7 @@ function create() {
   uiCamera = this.cameras.add(0, 0, config.width, config.height);
   uiCamera.ignore(worldContainer);
  
-  this.input.on("wheel", (pointer, currentlyOver, deltaX, deltaY) => {
+  this.input.on("wheel", (pointer, currentlyOver, deltaX, deltaY)  => {
     setCameraZoom(camera, camera.zoom - deltaY * 0.001);
   });
  
@@ -156,6 +188,10 @@ function create() {
   });
   createSpeedHud(this);
   updateSpeedHud();
+
+  createFiringHud(this);
+  this.input.keyboard.on("keydown-F", toggleFiringMode);
+  this.input.keyboard.on("keydown-X", stopFiring);
   
   this.input.on("pointerdown", (pointer) => {
     if (pointer.middleButtonDown()) {
@@ -166,7 +202,11 @@ function create() {
       return;
     }
     if (pointer.rightButtonDown()) {
-      issueMoveOrder(pointer.worldX, pointer.worldY, Boolean(pointer.event && pointer.event.shiftKey));
+      if (firingModeActive) {
+        issueFireOrder(pointer.worldX, pointer.worldY);
+      } else {
+        issueMoveOrder(pointer.worldX, pointer.worldY, Boolean(pointer.event && pointer.event.shiftKey));
+      }
       return;
     }
 
@@ -234,6 +274,7 @@ function create() {
 function update(time, delta) {
   const dt = delta / 1000;
   ships.forEach((ship) => updateShip(ship, dt));
+  updateShells(dt);
 }
  
 // ---- Ship creation & behavior ----
@@ -274,6 +315,8 @@ function createShip(scene, x, y) {
     speedOrderIndex: DEFAULT_SPEED_ORDER_INDEX,
     collisionRadius: 28,
     team: "player", // future: "enemy" ships won't be avoided, only rammed
+    fireTarget: null,
+    
   };
 }
 
@@ -285,6 +328,7 @@ function createTurrets(scene, shipX, shipY) {
   return TURRET_MOUNTS.map((mount) => {
     const sprite = scene.add.sprite(shipX, shipY, TURRET_TEXTURE_KEY[mount.type])
       .setDisplaySize(turretDisplaySize, turretDisplaySize)
+      .setOrigin(0.5, 0.33)   // <-- add this; (0,0)=top-left, (0.5,0.5)=canvas center, (1,1)=bottom-right
       .setDepth(TURRET_DEPTH[mount.type])
       .setRotation(mount.baseRotation);
     worldContainer.add(sprite);
@@ -299,6 +343,8 @@ function createTurrets(scene, shipX, shipY) {
       // hull turns. Once turrets become independently aimable, this is the
       // field a future aiming system would add an extra offset on top of.
       rotationOffset: mount.baseRotation,
+      reloadTimer: 0,
+      onTarget: false,
     };
   });
 }
@@ -310,16 +356,227 @@ function createTurrets(scene, shipX, shipY) {
 // turret's fixed rotationOffset — so the turret stays rigidly attached to
 // the ship (constant bearing relative to the hull) rather than holding a
 // fixed absolute world angle.
+
 function updateTurrets(ship) {
   const cos = Math.cos(ship.sprite.rotation);
   const sin = Math.sin(ship.sprite.rotation);
+
   ship.turrets.forEach((turret) => {
     const worldOffsetX = turret.dx * cos - turret.dy * sin;
     const worldOffsetY = turret.dx * sin + turret.dy * cos;
+
     turret.sprite.x = ship.sprite.x + worldOffsetX;
     turret.sprite.y = ship.sprite.y + worldOffsetY;
-    turret.sprite.rotation = ship.sprite.rotation + turret.rotationOffset;
+
+    const maxTraverse = TURRET_TRAVERSE;
+
+    if (ship.fireTarget) {
+      const angleToTarget = Phaser.Math.Angle.Between(
+        turret.sprite.x,
+        turret.sprite.y,
+        ship.fireTarget.x,
+        ship.fireTarget.y
+      ) - Math.PI / 2;
+
+      const traverseDelta = Phaser.Math.Angle.Wrap(
+        angleToTarget - turret.sprite.rotation
+      );
+
+      turret.onTarget = Math.abs(traverseDelta) <= maxTraverse;
+
+      turret.sprite.rotation += Phaser.Math.Clamp(
+        traverseDelta,
+        -maxTraverse,
+        maxTraverse
+      );
+    } else {
+      const homeRotation = ship.sprite.rotation + turret.rotationOffset;
+      const returnDelta = Phaser.Math.Angle.Wrap(
+        homeRotation - turret.sprite.rotation
+      );
+
+      turret.sprite.rotation += Phaser.Math.Clamp(
+        returnDelta,
+        -maxTraverse,
+        maxTraverse
+      );
+
+      if (Math.abs(returnDelta) <= maxTraverse) {
+        turret.sprite.rotation = homeRotation;
+      }
+
+      turret.onTarget = false;
+    }
   });
+}
+
+function createFiringHud(scene) {
+  firingModeIndicator = scene.add.text(
+    config.width / 2, 16, "FIRING MODE — right-click to target, F to toggle, X to stop firing",
+    { fontSize: "16px", color: "#ffffff", backgroundColor: "#7a1010", padding: { x: 12, y: 6 } },
+  ).setOrigin(0.5, 0).setDepth(10).setVisible(false);
+  scene.cameras.main.ignore(firingModeIndicator);
+}
+
+function setFiringMode(active) {
+  firingModeActive = active;
+  if (firingModeIndicator) firingModeIndicator.setVisible(firingModeActive);
+  // No longer clears ship.fireTarget here. Toggling F just switches what
+  // right-click does (fire vs move) and shows/hides the targeting HUD —
+  // it has no effect on any fire order already in progress. Only
+  // stopFiring() (bound to X) cancels an active fire order.
+}
+
+function toggleFiringMode() {
+  setFiringMode(!firingModeActive);
+}
+
+// Cancels the fire order for the currently selected ships. This is now the
+// ONLY way to stop a ship from firing — pressing F just hides/shows the
+// firing-mode UI and doesn't touch fireTarget at all.
+function stopFiring() {
+  if (selectedShips.length === 0) return;
+
+  selectedShips.forEach((ship) => {
+    ship.fireTarget = null;
+  });
+
+  // The dispersion ellipse is a single shared visual (not per-ship), so only
+  // tear it down once nothing is left firing at all — otherwise a ship
+  // outside the current selection that's still firing would lose its
+  // target reticle even though it's still shooting.
+  const anyShipStillFiring = ships.some((ship) => ship.fireTarget);
+  if (!anyShipStillFiring && dispersionEllipse) {
+    dispersionEllipse.destroy();
+    dispersionEllipse = null;
+  }
+}
+
+function issueFireOrder(x, y) {
+  if (selectedShips.length === 0) return;
+
+  selectedShips.forEach((ship) => {
+    if (ship.fireTarget && Phaser.Math.Distance.Between(ship.fireTarget.x, ship.fireTarget.y, x, y) <= FIRE_TARGET_TOGGLE_RADIUS) {
+      ship.fireTarget = null;
+
+      if (dispersionEllipse) {
+        dispersionEllipse.destroy();
+        dispersionEllipse = null;
+      }
+    } else {
+      ship.fireTarget = { x, y };
+
+      if (dispersionEllipse) {
+        dispersionEllipse.destroy();
+      }
+
+      dispersionEllipse = createDispersionEllipse(
+        ship.sprite.scene,
+        x,
+        y,
+        DISPERSION_SEMI_MAJOR,
+        DISPERSION_SEMI_MINOR
+      );
+    }
+  });
+}
+
+function updateFiring(ship, dt) {
+  if (!ship.fireTarget) return;
+  ship.turrets.forEach((turret) => {
+    turret.reloadTimer -= dt;
+    if (turret.reloadTimer > 0) return;
+    if (!turret.onTarget) return;
+    fireTurretVolley(ship, turret);
+    turret.reloadTimer = TURRET_RELOAD_SECONDS;
+  });
+}
+
+function fireTurretVolley(ship, turret) {
+  const scene = ship.sprite.scene;
+  const { x: targetX, y: targetY } = ship.fireTarget;
+  const cos = Math.cos(turret.sprite.rotation);
+  const sin = Math.sin(turret.sprite.rotation);
+  BARREL_LOCAL_OFFSETS.forEach((barrel) => {
+    const muzzleX = turret.sprite.x + barrel.dx * cos - barrel.dy * sin;
+    const muzzleY = turret.sprite.y + barrel.dx * sin + barrel.dy * cos;
+    const distance = Phaser.Math.Distance.Between(muzzleX, muzzleY, targetX, targetY);
+    const dispersion = getDispersionOffset(distance);
+    spawnShell(scene, muzzleX, muzzleY, targetX + dispersion.x, targetY + dispersion.y);
+  });
+}
+
+// Future dispersion hook — always zero for now.
+function getDispersionOffset(distance) {
+  return { x: 0, y: 0 };
+}
+
+function createDispersionEllipse(scene, x, y, semiMajor, semiMinor) {
+  const graphics = scene.add.graphics();
+  const pixel = 2;
+  const half = pixel / 2;
+  graphics.setDepth(1.5);
+  
+  const cx = x;
+  const cy = y;
+
+  const cell = (px, py) => graphics.fillRect(px - half, py - half, pixel, pixel);
+
+  // Semi-transparent red fill
+  graphics.fillStyle(0xff0000, 0.18);
+  for (let py = -semiMinor; py <= semiMinor; py += pixel) {
+    const normalizedY = py / semiMinor;
+    const halfWidth = semiMajor * Math.sqrt(Math.max(0, 1 - normalizedY * normalizedY));
+    const halfWidthPixels = Math.round(halfWidth / pixel) * pixel;
+    graphics.fillRect(cx - halfWidthPixels, cy + py - half, halfWidthPixels * 2, pixel);
+  }
+
+  // Ellipse outline — one quadrant, mirrored into the other three.
+  graphics.fillStyle(0xff0000, 0.9);
+  for (let angle = 0; angle <= Math.PI / 2; angle += 0.01) {
+    const px = Math.round((Math.cos(angle) * semiMajor) / pixel) * pixel;
+    const py = Math.round((Math.sin(angle) * semiMinor) / pixel) * pixel;
+    [1, -1].forEach((sx) => {
+      [1, -1].forEach((sy) => {
+        cell(cx + sx * px, cy + sy * py);
+      });
+    });
+  }
+
+  // Tick marks at the ends of each axis
+  const tickLength = Math.round(Math.min(semiMajor, semiMinor) * 0.5);
+  graphics.fillRect(cx - semiMajor, cy - half, tickLength, pixel);
+  graphics.fillRect(cx + semiMajor - tickLength, cy - half, tickLength, pixel);
+  graphics.fillRect(cx - half, cy - semiMinor, pixel, tickLength);
+  graphics.fillRect(cx - half, cy + semiMinor - tickLength, pixel, tickLength);
+
+  worldContainer.add(graphics);
+  return graphics;
+}
+
+function spawnShell(scene, x, y, targetX, targetY) {
+  const angle = Phaser.Math.Angle.Between(x, y, targetX, targetY);
+  const sprite = scene.add.sprite(x, y, "shell")
+    .setDisplaySize(shellDisplayWidth, shellDisplayHeight)
+    .setRotation(angle + Math.PI / 2)
+    .setDepth(2.8);
+  worldContainer.add(sprite);
+  activeShells.push({ sprite, vx: Math.cos(angle) * SHELL_SPEED, vy: Math.sin(angle) * SHELL_SPEED, targetX, targetY });
+}
+
+function updateShells(dt) {
+  for (let i = activeShells.length - 1; i >= 0; i -= 1) {
+    const shell = activeShells[i];
+    const remaining = Phaser.Math.Distance.Between(shell.sprite.x, shell.sprite.y, shell.targetX, shell.targetY);
+    const step = SHELL_SPEED * dt;
+    if (step >= remaining) {
+      shell.sprite.destroy();
+      activeShells.splice(i, 1);
+      continue;
+    }
+    shell.sprite.x += shell.vx * dt;
+    shell.sprite.y += shell.vy * dt;
+  }
 }
 
 function computeAvoidanceSteering(ship) {
@@ -651,7 +908,6 @@ function updateShip(ship, dt) {
   if (ship.slowingDown) {
     ship.slowdownFrameClock = (ship.slowdownFrameClock + dt) % (10 / 12);
   }
-  syncShipAnimationFrame(ship);
  
    if (ship.target) {
     const dist = Phaser.Math.Distance.Between(sprite.x, sprite.y, ship.target.x, ship.target.y);
@@ -757,6 +1013,7 @@ function updateShip(ship, dt) {
   ship.selectedRing.y = sprite.y;
 
   updateTurrets(ship);
+  updateFiring(ship, dt);
 }
  
 function stopShipAnimation(ship) {
