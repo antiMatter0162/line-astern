@@ -36,8 +36,13 @@ const SHIP_TYPE_DEFAULTS = {
   barrelNativeSpacing: 60,
   barrelNativeMuzzleDy: 164,
 
+  // Size of the static hull image and of every wake-sheet frame.
   hullFrameWidth: 960,
   hullFrameHeight: 2220,
+
+  // NOTE: wakeMovingFrames and wakeAccelerationFrames have no default on
+  // purpose — they depend on each class's wake art, so every class file
+  // must set them itself (see pennsylvania-class.js).
 };
 
 const SHIP_TYPES = {};
@@ -64,18 +69,19 @@ function registerShipType(typeDef) {
   };
 }
 
-// Animation keys are namespaced per type (e.g. "pennsylvania-moving") since
-// different classes use different texture atlases and Phaser's animation
-// keys are global — two classes can't share "ship-moving" once their
-// underlying textures differ.
-function movingAnimKey(stats) {
-  return `${stats.id}-moving`;
+// Wake animation keys are namespaced per type (e.g. "pennsylvania-wake-moving")
+// since different classes use different wake sheets and Phaser's animation
+// keys are global — two classes can't share one key once their underlying
+// textures differ. The hull itself no longer animates, so there are no
+// hull animation keys anymore.
+function movingWakeAnimKey(stats) {
+  return `${stats.id}-wake-moving`;
 }
-function slowingAnimKey(stats) {
-  return `${stats.id}-slowing-down`;
+function slowingWakeAnimKey(stats) {
+  return `${stats.id}-wake-slowing-down`;
 }
-function acceleratingAnimKey(stats) {
-  return `${stats.id}-accelerating`;
+function acceleratingWakeAnimKey(stats) {
+  return `${stats.id}-wake-accelerating`;
 }
 
 // Barrel muzzle offsets depend on turretDisplaySize, which varies per

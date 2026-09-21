@@ -8,22 +8,34 @@ registerShipType({
 
   // Texture keys are namespaced per class so multiple ship types can be
   // loaded into the same Phaser texture cache without collisions.
+  //
+  // The hull is a single static image. All ship animation lives in the two
+  // wake spritesheets, which are drawn as a separate sprite on top of it.
   textures: {
     hullStationary: "pennsylvania-hull-stationary",
-    hullMoving: "pennsylvania-hull-moving",
-    hullSlowdown: "pennsylvania-hull-slowdown",
+    wakeMoving: "pennsylvania-wake",
+    wakeAcceleration: "pennsylvania-acceleration",
     turretA: "pennsylvania-turret-a",
     turretB: "pennsylvania-turret-b",
   },
   assetPaths: {
-    hullStationary: "assets/Pennyslvania-Class Blank.png",
-    hullMoving: "assets/Pennyslvania-Class.png",
-    hullSlowdown: "assets/Pennyslvania-Class Slowdown.png",
+    hullStationary: "assets/Pennyslvania-Class.png",
+    wakeMoving: "assets/Pennsylvania-Wake.png",
+    wakeAcceleration: "assets/Pennsylvania-Acceleration.png",
     turretA: "assets/Pennsylvania Turret A.png",
     turretB: "assets/Pennsylvania Turret B.png",
   },
+
+  // Size of the blank hull AND of every frame in both wake sheets — they
+  // must match exactly so the wake sprite lines up with the hull.
   hullFrameWidth: 960,
   hullFrameHeight: 2220,
+
+  // Frames actually used in each wake sheet (each sheet has an empty
+  // trailing cell that Phaser counts as a frame but we never play).
+  wakeMovingFrames: 7,        // Pennsylvania-Wake.png: 4 cols x 2 rows
+  wakeAccelerationFrames: 9,  // Pennsylvania-Acceleration.png: 5 cols x 2 rows,
+                              // frame 0 = full spray, last frame = nearly gone
 
   displayWidth: 56,
   displayHeight: 130,
