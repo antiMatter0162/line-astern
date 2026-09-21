@@ -22,11 +22,17 @@ const config = {
 
   backgroundColor: "#06345a",
 
+  render: {
+    roundPixels: true,
+    antialias: true,
+  },
+
   scale: {
     mode: Phaser.Scale.ENVELOP,
     autoCenter: Phaser.Scale.CENTER_BOTH,
     width: 1280,
     height: 800,
+    autoRound: true,
   },
 
   scene: {
@@ -42,18 +48,17 @@ let ships = [];
 let selectedShips = [];
 let panStart = null;
 let waypointMarkers = [];
+let cameraPanKeys = null;
+let cameraZoomKeys = null;
 const waypointSize = 48;
 const waypointSourceSize = 480;
 const waypointReachLeeway = 0;
 const turnWindowLeeway = 3;
 
-// Frame rate shared by every wake animation (moving loop, slowdown, acceleration).
 const WAKE_FPS = 12;
+const CAMERA_PAN_SPEED = 450;
 
-// Turret A/B mounts render at different depths (B, the inner/superfiring
-// mount, always on top of A) — this convention is shared across every ship
-// class, unlike the mount geometry itself, which lives per-class in
-// stats.turretMounts.
+// Turret A/B mounts render at different depths
 const TURRET_DEPTH = { A: 2.4, B: 2.6 };
 
 // ---- Firing mode ----
@@ -61,11 +66,7 @@ let firingModeActive = false;
 let firingModeIndicator = null;
 const FIRE_TARGET_TOGGLE_RADIUS = 24; // right-clicking within this many world units of the current target cancels it
 
-// Shell art/speed is shared across all ship classes for now (not yet a
-// per-class stat) — SHELL_SCALE used to be derived from the old global
-// shipDisplayWidth (56); that constant is gone now that display size is
-// per-class, so the same numeric baseline (56) is inlined directly here
-// instead. Revisit if you want shell size to vary by ship class later.
+// Shell art/speed is shared across all ship classes for now
 const SHELL_SCALE = (56 / 960) * 0.5;
 const shellDisplayWidth = 75 * SHELL_SCALE;
 const shellDisplayHeight = 135 * SHELL_SCALE;
@@ -107,6 +108,11 @@ function preload() {
       frameHeight: stats.hullFrameHeight,
     });
   });
+  Object.values(SHIP_TYPES).forEach((stats) => {
+    this.textures.get(stats.textures.turretA).setFilter(Phaser.Textures.FilterMode.NEAREST);
+    this.textures.get(stats.textures.turretB).setFilter(Phaser.Textures.FilterMode.NEAREST);
+    this.textures.get(stats.textures.hullStationary).setFilter(Phaser.Textures.FilterMode.NEAREST);
+  });
 }
 
 let cannotAimMessage = null;
@@ -135,11 +141,10 @@ function create() {
   camera.setBounds(0, 0, 12800, 8000);
   camera.centerOn(6400, 4000);
 
+  cameraPanKeys = setupCameraPanKeys(this);
+  cameraZoomKeys = setupCameraZoomKeys(this);
   // A second camera, permanently un-zoomed and un-scrolled, dedicated to HUD
-  // elements. It ignores everything in worldContainer (the ocean, ships,
-  // waypoint markers, path lines, the selection box — anything added to that
-  // container, present or future), so it only ever draws the HUD, always at
-  // a fixed screen position and size regardless of what the main camera does.
+  // elements.
   uiCamera = this.cameras.add(0, 0, config.width, config.height);
   uiCamera.ignore(worldContainer);
 
@@ -147,22 +152,7 @@ function create() {
     setCameraZoom(camera, camera.zoom - deltaY * 0.001);
   });
 
-  this.input.keyboard.on("keydown", (event) => {
-    if (event.key === "+" || event.key === "=") {
-      setCameraZoom(camera, camera.zoom + 0.1);
-    } else if (event.key === "-" || event.key === "_") {
-      setCameraZoom(camera, camera.zoom - 0.1);
-    }
-  });
-
-  // Every registered ship type gets its own set of WAKE animations, keyed by
-  // movingWakeAnimKey(stats)/slowingWakeAnimKey(stats)/acceleratingWakeAnimKey(stats)
-  // (see ship-types.js) — the hull itself no longer animates.
-  //
-  // Pennsylvania-Acceleration.png: frame 0 = full spray, last frame = nearly
-  // gone. So "slowing" plays 0 -> last (spray dies away) and "accelerating"
-  // plays last -> 0 (spray builds up). If the sheet reads the other way
-  // round in game, swap the .reverse() below.
+  // Every registered ship type gets its own set of WAKE animations
   const range = (n) => Array.from({ length: n }, (_, i) => i);
 
   Object.values(SHIP_TYPES).forEach((stats) => {
@@ -291,6 +281,8 @@ function create() {
 function update(time, delta) {
   const dt = delta / 1000;
   ships.forEach((ship) => updateShip(ship, dt));
+  updateCameraPan(this.cameras.main, cameraPanKeys, dt);
+  updateCameraZoom(this.cameras.main, cameraZoomKeys, dt);
   resolveShipCollisions(dt);
   updateShells(dt);
   updateWakes(dt);
@@ -487,19 +479,11 @@ function createFiringHud(scene) {
 function setFiringMode(active) {
   firingModeActive = active;
   if (firingModeIndicator) firingModeIndicator.setVisible(firingModeActive);
-  // Doesn't touch any ship's fireTarget. Toggling F just switches what
-  // right-click does (fire vs move) and shows/hides the targeting HUD —
-  // it has no effect on any fire order already in progress. Only
-  // stopFiring() (bound to X) cancels an active fire order.
 }
 
 function toggleFiringMode() {
   setFiringMode(!firingModeActive);
 }
-
-// Cancels the fire order for the currently selected ships and tears down
-// each of their dispersion ellipses. This is the ONLY way to stop a ship
-// from firing — pressing F just hides/shows the firing-mode UI.
 function stopFiring() {
   if (selectedShips.length === 0) return;
 
@@ -604,12 +588,8 @@ function getDispersionOffset(distance, shipRotation, curve, sigma) {
     y: localX * sin + localY * cos,
   };
 }
-// Draws a pixelated circle OUTLINE (no fill) in LOCAL coordinates centered
-// on (0,0) — same blocky quantize-to-grid technique as the dispersion
-// ellipse outline (see drawDispersionEllipseGraphics), just with equal
-// horizontal/vertical radii. `pixel` controls the chunkiness of the blocks;
-// bigger pixel = chunkier/more pixelated, smaller = smoother.
-function drawPixelatedCircleOutline(scene, radius, color = 0xff4444, pixel = 2) {
+
+function drawPixelatedCircleOutline(scene, radius, color = 0xEBBE4D, pixel = 2) {
   const graphics = scene.add.graphics();
   const half = pixel / 2;
   const cell = (px, py) => graphics.fillRect(px - half, py - half, pixel, pixel);
@@ -1240,6 +1220,56 @@ function getSteeringTarget(ship) {
   }
 
   return target;
+}
+
+function setupCameraZoomKeys(scene) {
+  return scene.input.keyboard.addKeys({
+    zoomIn: Phaser.Input.Keyboard.KeyCodes.PLUS,
+    zoomOut: Phaser.Input.Keyboard.KeyCodes.MINUS,
+    zoomInNumpad: Phaser.Input.Keyboard.KeyCodes.NUMPAD_ADD,
+    zoomOutNumpad: Phaser.Input.Keyboard.KeyCodes.NUMPAD_SUBTRACT,
+  });
+}
+
+const CAMERA_ZOOM_SPEED = 1; // zoom levels per second while held
+
+function updateCameraZoom(camera, keys, dt) {
+  if (keys.zoomIn.isDown || keys.zoomInNumpad.isDown) {
+    setCameraZoom(camera, camera.zoom + CAMERA_ZOOM_SPEED * dt);
+  } else if (keys.zoomOut.isDown || keys.zoomOutNumpad.isDown) {
+    setCameraZoom(camera, camera.zoom - CAMERA_ZOOM_SPEED * dt);
+  }
+}
+
+function setupCameraPanKeys(scene) {
+  return scene.input.keyboard.addKeys({
+    up: 'W',
+    down: 'S',
+    left: 'A',
+    right: 'D',
+  });
+}
+
+// Continuous WASD panning, polled every frame (not a keydown event) so
+// holding a key keeps panning rather than moving once per press.
+function updateCameraPan(camera, keys, dt) {
+  let dx = 0;
+  let dy = 0;
+  if (keys.left.isDown) dx -= 1;
+  if (keys.right.isDown) dx += 1;
+  if (keys.up.isDown) dy -= 1;
+  if (keys.down.isDown) dy += 1;
+
+  if (dx === 0 && dy === 0) return;
+
+  // Normalize so diagonal panning isn't faster than cardinal panning
+  const length = Math.sqrt(dx * dx + dy * dy);
+  dx /= length;
+  dy /= length;
+
+  // Divide by zoom so panning feels the same screen-speed
+  camera.scrollX += (dx * CAMERA_PAN_SPEED * dt) / camera.zoom;
+  camera.scrollY += (dy * CAMERA_PAN_SPEED * dt) / camera.zoom;
 }
 
 function setCameraZoom(camera, zoom) {
