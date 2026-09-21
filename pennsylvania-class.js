@@ -28,6 +28,8 @@ registerShipType({
   displayWidth: 56,
   displayHeight: 130,
   turretDisplaySize: 21,
+  
+  maxHealth: 52000,
 
   maxSpeed: 90,
   acceleration: 108,

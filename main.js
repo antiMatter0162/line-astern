@@ -281,6 +281,7 @@ function create() {
 function update(time, delta) {
   const dt = delta / 1000;
   ships.forEach((ship) => updateShip(ship, dt));
+  resolveShipCollisions(dt);
   updateShells(dt);
   updateWakes(dt);
 }
@@ -288,11 +289,6 @@ function update(time, delta) {
 // ---- Ship creation & behavior ----
 
 // typeId is a key into SHIP_TYPES (see ship-types.js), e.g. "pennsylvania".
-// Every stat that used to be a hardcoded module-level constant — display
-// size, speed/accel/turn rate, turret layout, dispersion curve, min firing
-// distance, etc. — now comes from that type's registered stats instead, so
-// two ships created with different typeIds can behave completely
-// differently while sharing all the same runtime code below.
 function createShip(scene, x, y, typeId) {
   const stats = SHIP_TYPES[typeId];
   if (!stats) {
@@ -314,17 +310,18 @@ function createShip(scene, x, y, typeId) {
     .setDepth(1)
     .setVisible(false);
 
-  worldContainer.add([sprite, selectedRing, minRangeCircle]);
+  const healthBar = scene.add.graphics().setDepth(3.5).setVisible(false);
+
+  worldContainer.add([sprite, selectedRing, minRangeCircle, healthBar]);
 
   return {
     sprite,
     turrets,
     stats,
-    // Precomputed once here rather than every time a turret fires, since it
-    // depends only on stats (which don't change), not on anything dynamic.
     barrelLocalOffsets: computeBarrelLocalOffsets(stats),
     selectedRing,
     minRangeCircle,
+    healthBar,
     target: null,
     waypoints: [],
     pathPreviewLastUpdate: -Infinity,
@@ -338,21 +335,22 @@ function createShip(scene, x, y, typeId) {
     maxSpeed: stats.maxSpeed,
     acceleration: stats.acceleration,
     deceleration: stats.deceleration,
-    braking: false, //handles cases where the ship almost stops, but decides to move again in a circle to re-reach the waypoint
+    braking: false,
     turnRate: stats.turnRate,
     speedOrderIndex: DEFAULT_SPEED_ORDER_INDEX,
     collisionRadius: stats.collisionRadius,
-    team: "player", // future: "enemy" ships won't be avoided, only rammed
+    team: "player",
     fireTarget: null,
     dispersionEllipse: null,
     dispersionEllipseRangeAtBuild: null,
+    maxHealth: stats.maxHealth,
+    health: stats.maxHealth,
+    collisionDamageCooldown: 0,
   };
 }
 
 // Builds the four turret sprites for a ship, anchored per stats.turretMounts.
-// Each turret tracks its own local offset and a fixed base rotation; see
-// updateTurrets() for how those are combined with the hull's rotation every
-// frame.
+// Each turret tracks its own local offset and a fixed base rotation
 function createTurrets(scene, shipX, shipY, stats) {
   return stats.turretMounts.map((mount) => {
     const textureKey = mount.type === "A" ? stats.textures.turretA : stats.textures.turretB;
@@ -366,12 +364,7 @@ function createTurrets(scene, shipX, shipY, stats) {
       sprite,
       dx: mount.dx,
       dy: mount.dy,
-      // Fixed offset from the ship's own heading — NOT an absolute world
-      // angle. Every frame this gets added to the ship's current rotation,
-      // which is what makes the turret preserve its orientation relative to
-      // the ship (rigidly attached, like it's welded to the deck) as the
-      // hull turns. Once turrets become independently aimable, this is the
-      // field a future aiming system would add an extra offset on top of.
+      // Fixed offset from the ship's own heading
       rotationOffset: mount.baseRotation,
       reloadTimer: 0,
       onTarget: false,
@@ -379,13 +372,38 @@ function createTurrets(scene, shipX, shipY, stats) {
   });
 }
 
-// Repositions and reorients a ship's turrets to follow the hull: each
-// turret's fixed local offset is rotated by the ship's current heading to
-// get a world-space offset, which is added to the ship's position, and the
-// turret sprite's own rotation is set to the ship's rotation plus the
-// turret's fixed rotationOffset — so the turret stays rigidly attached to
-// the ship (constant bearing relative to the hull) rather than holding a
-// fixed absolute world angle.
+const HEALTH_BAR_WIDTH = 60;
+const HEALTH_BAR_HEIGHT = 5;
+const HEALTH_BAR_OFFSET_Y = -15; // above the selection ring
+
+function updateHealthBar(ship) {
+  const isSelected = selectedShips.includes(ship);
+  ship.healthBar.setVisible(isSelected);
+  if (!isSelected) return;
+
+  const { healthBar, sprite, health, maxHealth } = ship;
+  const barX = sprite.x - HEALTH_BAR_WIDTH / 2;
+  const barY = sprite.y - sprite.displayHeight / 2 + HEALTH_BAR_OFFSET_Y;
+  const healthFraction = Phaser.Math.Clamp(health / maxHealth, 0, 1);
+
+  healthBar.clear();
+
+  // Background/border
+  healthBar.fillStyle(0x000000, 0.6);
+  healthBar.fillRect(barX - 1, barY - 1, HEALTH_BAR_WIDTH + 2, HEALTH_BAR_HEIGHT + 2);
+
+  // Fill — green when healthy, shifting to red as health drops
+  const fillColor = Phaser.Display.Color.Interpolate.ColorWithColor(
+    new Phaser.Display.Color(200, 40, 40),
+    new Phaser.Display.Color(60, 200, 80),
+    100,
+    Math.round(healthFraction * 100),
+  );
+  healthBar.fillStyle(Phaser.Display.Color.GetColor(fillColor.r, fillColor.g, fillColor.b), 1);
+  healthBar.fillRect(barX, barY, HEALTH_BAR_WIDTH * healthFraction, HEALTH_BAR_HEIGHT);
+}
+
+// Repositions and reorients a ship's turrets to follow the hull
 
 function updateTurrets(ship) {
   const cos = Math.cos(ship.sprite.rotation);
@@ -891,6 +909,96 @@ function computeAvoidanceSteering(ship) {
   return { x: pushX, y: pushY };
 }
 
+// ---- Ship-to-ship collision ----
+const COLLISION_RESTITUTION = 0.08; // very small bounce — ships mostly just stop, not rebound
+const COLLISION_SPEED_RETENTION = 0.15; // fraction of speed kept after a hard impact
+const COLLISION_MIN_IMPACT_SPEED = 5; // ignore light grazes, only "real" hits do damage
+const COLLISION_DAMAGE_SCALE = 450; // damage per unit of closing speed at impact
+const COLLISION_DAMAGE_COOLDOWN = 0.75; // seconds before a ship can take collision damage again
+
+// Reconstructs a ship's velocity vector from its speed + heading, since
+// ships don't store vx/vy directly — same heading convention used
+// everywhere else (rotation - PI/2 is "forward").
+function getShipVelocity(ship) {
+  const heading = ship.sprite.rotation - Math.PI / 2;
+  return {
+    vx: Math.cos(heading) * ship.speed,
+    vy: Math.sin(heading) * ship.speed,
+  };
+}
+
+function resolveShipCollisions(dt) {
+  ships.forEach((ship) => {
+    if (ship.collisionDamageCooldown > 0) {
+      ship.collisionDamageCooldown = Math.max(0, ship.collisionDamageCooldown - dt);
+    }
+  });
+
+  for (let i = 0; i < ships.length; i += 1) {
+    for (let j = i + 1; j < ships.length; j += 1) {
+      const shipA = ships[i];
+      const shipB = ships[j];
+
+      const dx = shipB.sprite.x - shipA.sprite.x;
+      const dy = shipB.sprite.y - shipA.sprite.y;
+      const dist = Math.sqrt(dx * dx + dy * dy) || 0.0001;
+      const minDist = shipA.collisionRadius + shipB.collisionRadius;
+
+      if (dist >= minDist) continue;
+
+      const nx = dx / dist;
+      const ny = dy / dist;
+
+      // --- Positional correction: shove both hulls apart along the contact
+      // normal until they no longer overlap, split by relative radius so a
+      // bigger ship gets displaced less than a smaller one (stand-in for
+      // mass until there's an actual mass stat).
+      const overlap = minDist - dist;
+      const totalRadius = shipA.collisionRadius + shipB.collisionRadius;
+      const pushA = overlap * (shipB.collisionRadius / totalRadius);
+      const pushB = overlap * (shipA.collisionRadius / totalRadius);
+
+      shipA.sprite.x -= nx * pushA;
+      shipA.sprite.y -= ny * pushA;
+      shipB.sprite.x += nx * pushB;
+      shipB.sprite.y += ny * pushB;
+
+      // --- Impact speed: how fast the two ships were closing along the
+      // contact normal, independent of their heading — this drives both the
+      // bounce and the damage below.
+      const velA = getShipVelocity(shipA);
+      const velB = getShipVelocity(shipB);
+      const relVx = velB.vx - velA.vx;
+      const relVy = velB.vy - velA.vy;
+      const closingSpeed = -(relVx * nx + relVy * ny);
+
+      if (closingSpeed <= COLLISION_MIN_IMPACT_SPEED) continue;
+
+      // --- Bounce: ships lose almost all their speed (this is a slam, not
+      // a rebound) and get a small extra shove apart proportional to how
+      // hard they hit — COLLISION_RESTITUTION keeps this subtle.
+      shipA.speed *= COLLISION_SPEED_RETENTION;
+      shipB.speed *= COLLISION_SPEED_RETENTION;
+
+      const bounceNudge = closingSpeed * COLLISION_RESTITUTION * dt;
+      shipA.sprite.x -= nx * bounceNudge;
+      shipA.sprite.y -= ny * bounceNudge;
+      shipB.sprite.x += nx * bounceNudge;
+      shipB.sprite.y += ny * bounceNudge;
+
+      // --- Damage: scaled by impact speed, gated by a per-ship cooldown so
+      // two hulls stuck overlapping don't get re-damaged every single frame.
+      if (shipA.collisionDamageCooldown <= 0 && shipB.collisionDamageCooldown <= 0) {
+        const damage = closingSpeed * COLLISION_DAMAGE_SCALE;
+        shipA.health = Math.max(0, shipA.health - damage);
+        shipB.health = Math.max(0, shipB.health - damage);
+        shipA.collisionDamageCooldown = COLLISION_DAMAGE_COOLDOWN;
+        shipB.collisionDamageCooldown = COLLISION_DAMAGE_COOLDOWN;
+      }
+    }
+  }
+}
+
 function isPointerOverSpeedHud(pointer) {
   if (!speedHudButtons) return false;
   return speedHudButtons.some(
@@ -1301,6 +1409,7 @@ function updateShip(ship, dt) {
   updateFiring(ship, dt);
   updateDispersionEllipseTransform(ship);
   updateShipWake(ship, dt);
+  updateHealthBar(ship);
 }
 
 function stopShipAnimation(ship) {

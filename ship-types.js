@@ -15,6 +15,8 @@ const SHIP_TYPE_DEFAULTS = {
   displayHeight: 130,
   turretDisplaySize: 21,
 
+  maxHealth: 25000,
+
   maxSpeed: 80,
   acceleration: 100,
   deceleration: 100,
