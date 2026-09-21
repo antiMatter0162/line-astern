@@ -60,7 +60,7 @@ registerShipType({
     { type: "B", dx: 0, dy: 23.5, baseRotation: 0 }, // stern, superfiring
     { type: "A", dx: 0, dy: 38, baseRotation: 0 }, // stern-most
   ],
-  turretTraverse: Phaser.Math.DegToRad(0.15),
+  turretTraverse: Phaser.Math.DegToRad(0.5),
   turretReloadSeconds: 10,
 
   minFiringDistance: 150,

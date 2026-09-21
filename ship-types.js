@@ -23,7 +23,7 @@ const SHIP_TYPE_DEFAULTS = {
   turnRate: Phaser.Math.DegToRad(18),
   collisionRadius: 26,
 
-  turretTraverse: Phaser.Math.DegToRad(0.15),
+  turretTraverse: Phaser.Math.DegToRad(0.5),
   turretReloadSeconds: 12,
   minFiringDistance: 150,
 
