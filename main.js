@@ -98,6 +98,10 @@ function preload() {
   this.load.image("selection-circle", "assets/Selection-Circle.png");
   this.load.image("waypoint", "assets/Waypoint.png");
   this.load.image("shell", "assets/Shell.png");
+  this.load.spritesheet("explosion", "assets/Explosion.png", {
+    frameWidth: 720,
+    frameHeight: 720,
+  });
 
   Object.values(SHIP_TYPES).forEach((stats) => {
     this.load.image(stats.textures.hullStationary, stats.assetPaths.hullStationary);
@@ -116,6 +120,7 @@ function preload() {
     this.textures.get(stats.textures.turretA).setFilter(Phaser.Textures.FilterMode.NEAREST);
     this.textures.get(stats.textures.turretB).setFilter(Phaser.Textures.FilterMode.NEAREST);
     this.textures.get(stats.textures.hullStationary).setFilter(Phaser.Textures.FilterMode.NEAREST);
+    this.textures.get("explosion").setFilter(Phaser.Textures.FilterMode.NEAREST);
   });
 }
 
@@ -183,6 +188,12 @@ function create() {
       key: acceleratingWakeAnimKey(stats),
       frames: [...decayFrames].reverse(),
       frameRate: WAKE_FPS,
+      repeat: 0,
+    });
+     this.anims.create({
+      key: "explosion",
+      frames: this.anims.generateFrameNumbers("explosion", { start: 0, end: 11 }),
+      frameRate: 12,
       repeat: 0,
     });
   });
@@ -1018,6 +1029,14 @@ function resolveShipCollisions(dt) {
 function beginSinking(ship) {
   if (ship.sinking) return;
   const scene = ship.sprite.scene;
+
+  const explosionSize = Math.max(ship.stats.displayWidth, ship.stats.displayHeight) * 0.6;
+  const explosionSprite = scene.add.sprite(ship.sprite.x, ship.sprite.y, "explosion")
+    .setDisplaySize(explosionSize, explosionSize)
+    .setDepth(3.6); // above hull/turrets/health bar, below HUD text
+  worldContainer.add(explosionSprite);
+  explosionSprite.play("explosion");
+  explosionSprite.once("animationcomplete", () => explosionSprite.destroy());
 
   ship.sinking = true;
   ship.sinkElapsed = 0;
