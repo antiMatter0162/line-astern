@@ -73,10 +73,14 @@ const shellDisplayHeight = 135 * SHELL_SCALE;
 const SHELL_SPEED = 260;
 let activeShells = [];
 
-// Naval "bell order" style speed settings, each a fraction of a ship's
-// absolute top (flank) speed. Ships steer/cruise capped at whichever order
-// is currently in effect; braking to a full stop at a final waypoint always
-// goes to zero regardless of the order.
+//sinking parameters
+const SINK_DURATION = 30; 
+const SINK_PIXEL = 2;     
+const SINK_JITTER = 0.22;
+const SINK_LIST_ANGLE = 0.5; 
+const SINK_FOAM_DENSITY = 0.35;
+
+// Naval "bell order" style speed settings
 const SPEED_ORDERS = [
   { id: "ahead_1_3", label: "1 · Ahead 1/3", fraction: 1 / 5, key: "ONE" },
   { id: "ahead_2_3", label: "2 · Ahead 2/3", fraction: 1 / 2, key: "TWO" },
@@ -198,6 +202,7 @@ function create() {
   this.input.keyboard.on("keydown-F", toggleFiringMode);
   this.input.keyboard.on("keydown-X", stopFiring);
   this.input.keyboard.on("keydown-S", stopSelectedShips);
+  //this.input.keyboard.on("keydown-PERIOD", killSelectedShips); // debug: force-sink selected ships
 
   this.input.on("pointerdown", (pointer) => {
     if (pointer.middleButtonDown()) {
@@ -222,6 +227,7 @@ function create() {
     let clickedShip = null;
     let clickedDist = Infinity;
     ships.forEach((ship) => {
+      if (ship.sinking) return; // can't select a dying ship
       const dist = Phaser.Math.Distance.Between(pointer.worldX, pointer.worldY, ship.sprite.x, ship.sprite.y);
       if (dist < 20 && dist < clickedDist) {
         clickedShip = ship;
@@ -281,6 +287,7 @@ function create() {
 function update(time, delta) {
   const dt = delta / 1000;
   ships.forEach((ship) => updateShip(ship, dt));
+  ships = ships.filter((ship) => !ship.sunk);
   updateCameraPan(this.cameras.main, cameraPanKeys, dt);
   updateCameraZoom(this.cameras.main, cameraZoomKeys, dt);
   resolveShipCollisions(dt);
@@ -362,6 +369,15 @@ function createShip(scene, x, y, typeId) {
     maxHealth: stats.maxHealth,
     health: stats.maxHealth,
     collisionDamageCooldown: 0,
+    sinking: false,
+    sunk: false,
+    sinkElapsed: 0,
+    sinkProgress: 0,
+    listSide: 1,
+    deathRotation: 0,
+    waterlineSeed: null,
+    waterOverlay: null,
+    waterOverlayLastUpdate: 0,
   };
 }
 
@@ -685,9 +701,7 @@ function refreshShipDispersionEllipse(ship) {
 }
 
 // Called every frame for every ship. Keeps the ellipse's rotation locked to
-// the bearing toward the target at all times, and rebuilds its size only
-// when the range has drifted past a small threshold — cheap per-frame work
-// (setRotation) versus an occasional full redraw, rather than redrawing
+// the bearing toward the target at all times
 // several hundred fillRect calls every single frame.
 function updateDispersionEllipseTransform(ship) {
   if (!ship.dispersionEllipse) return;
@@ -709,9 +723,7 @@ function updateDispersionEllipseTransform(ship) {
 }
 
 // Syncs every ship's dispersion ellipse visibility to the current
-// selection. Call this any time selectedShips changes — the ellipse itself
-// keeps existing/updating for every firing ship regardless of selection,
-// only its visibility is selection-dependent.
+// selection.
 function updateDispersionEllipseVisibility() {
   ships.forEach((ship) => {
     if (ship.dispersionEllipse) {
@@ -769,8 +781,7 @@ function drawFoamClump(graphics, centerX, centerY, cellCount, pixel, alpha) {
 
     // Randomly step to a neighboring cell (4-directional random walk) so
     // each clump grows into an irregular blob shape rather than a filled
-    // rectangle — occasionally jumping back near center keeps it compact
-    // instead of wandering into a long snake.
+    // rectangle
     if (Math.random() < 0.25) {
       px = centerX;
       py = centerY;
@@ -1002,6 +1013,170 @@ function resolveShipCollisions(dt) {
       }
     }
   }
+}
+
+function beginSinking(ship) {
+  if (ship.sinking) return;
+  const scene = ship.sprite.scene;
+
+  ship.sinking = true;
+  ship.sinkElapsed = 0;
+  ship.sinkProgress = 0;
+  ship.listSide = Math.random() < 0.5 ? 1 : -1; // which beam floods first
+
+  if (ship.target) removeWaypointMarker(ship.target);
+  ship.waypoints.forEach(removeWaypointMarker);
+  ship.waypoints = [];
+  ship.target = null;
+  ship.braking = false;
+  ship.fireTarget = null;
+
+  if (ship.dispersionEllipse) {
+    ship.dispersionEllipse.destroy();
+    ship.dispersionEllipse = null;
+  }
+  if (ship.pathLine) {
+    ship.pathLine.destroy();
+    ship.pathLine = null;
+  }
+
+  // A dead ship can't stay selected — its HUD elements (range circles,
+  // health bar, selection ring) shouldn't keep drawing over the death
+  // animation, and it shouldn't keep taking orders.
+  const selIndex = selectedShips.indexOf(ship);
+  if (selIndex >= 0) selectedShips.splice(selIndex, 1);
+  ship.selectedRing.setVisible(false);
+  ship.minRangeCircle.setVisible(false);
+  ship.maxRangeCircle.setVisible(false);
+  ship.healthBar.setVisible(false);
+  ship.wakeSprite.setVisible(false);
+  updateSpeedHud();
+
+  ship.listSide = Math.random() < 0.5 ? 1 : -1; // which beam floods first
+  ship.deathRotation = ship.sprite.rotation;
+
+  ship.waterlineSeed = {
+    a: Phaser.Math.FloatBetween(0, Math.PI * 2),
+    b: Phaser.Math.FloatBetween(0, Math.PI * 2),
+    c: Phaser.Math.FloatBetween(0, Math.PI * 2),
+  };
+
+
+  ship.waterOverlay = scene.add.graphics().setDepth(2.75); // above turrets (2.4–2.6)
+  worldContainer.add(ship.waterOverlay);
+}
+
+// Redraws the water overlay in the ship's own local frame (position +
+// rotation are set on the Graphics object itself, same trick as the
+// dispersion ellipse), so it tracks the hull without per-point transforms.
+function waterlineOffset(seed, normalizedY, time) {
+  const swell = Math.sin(normalizedY * 5 + seed.a + time * 0.5) * 0.5;
+  const chop = Math.sin(normalizedY * 12 + seed.b - time * 1.1) * 0.3;
+  const ripple = Math.sin(normalizedY * 23 + seed.c + time * 1.8) * 0.2;
+  return swell + chop + ripple; // roughly in [-1, 1]
+}
+
+function redrawWaterOverlay(ship) {
+  const { stats, waterOverlay, listSide, waterlineSeed, sinkProgress } = ship;
+  const time = ship.sinkElapsed;
+  
+  console.log(ship.sprite.x.toFixed(3), ship.sprite.y.toFixed(3), ship.sprite.rotation.toFixed(5), sinkProgress.toFixed(4));
+
+  const w = stats.displayWidth * 1.35;
+  const h = stats.displayHeight * 1.15;
+  const halfW = w / 2;
+  const halfH = h / 2;
+  const pixel = SINK_PIXEL;
+  const half = pixel / 2;
+  const cell = (px, py) => waterOverlay.fillRect(px - half, py - half, pixel, pixel);
+
+  waterOverlay.clear();
+  waterOverlay.setPosition(Math.round(ship.sprite.x), Math.round(ship.sprite.y));
+  waterOverlay.setRotation(ship.sprite.rotation);
+
+  const baseDepth = w * sinkProgress;
+  const waveAmplitude = w * SINK_JITTER * (1 - sinkProgress * 0.6);
+  const bodyAlpha = Phaser.Math.Linear(0.65, 1, sinkProgress);
+  const foamFade = Phaser.Math.Clamp(1 - sinkProgress / 0.85, 0, 1) * Phaser.Math.Clamp(sinkProgress / 0.25, 0, 1);
+
+  waterOverlay.setAlpha(bodyAlpha); 
+
+  const edgeXs = [];
+  let prevDepth = null;
+  const maxStepPerRow = pixel * 3; // limits how sharply the edge can fold row-to-row
+
+  for (let py = -halfH; py <= halfH; py += pixel) {
+    const normalizedY = py / halfH;
+    const offset = waterlineOffset(waterlineSeed, normalizedY, time) * waveAmplitude;
+    let depth = Math.round(Phaser.Math.Clamp(baseDepth + offset, 0, w) / pixel) * pixel;
+
+    if (prevDepth !== null) {
+      depth = Phaser.Math.Clamp(depth, prevDepth - maxStepPerRow, prevDepth + maxStepPerRow);
+    }
+    prevDepth = depth;
+
+    edgeXs.push(listSide === 1 ? halfW - depth : -halfW + depth);
+  }  
+
+  if (edgeXs.some((x, i) => (listSide === 1 ? x < halfW : x > -halfW))) {
+    const backX = listSide === 1 ? halfW : -halfW;
+    waterOverlay.fillStyle(0x06345a, 1); 
+    waterOverlay.beginPath();
+    waterOverlay.moveTo(backX, -halfH);
+    let prevX = edgeXs[0];
+    edgeXs.forEach((x, i) => {
+      const y = -halfH + i * pixel;
+      waterOverlay.lineTo(prevX, y);
+      waterOverlay.lineTo(x, y);
+      prevX = x;
+    });
+    waterOverlay.lineTo(backX, halfH);
+    waterOverlay.closePath();
+    waterOverlay.fillPath();
+  }
+  
+  edgeXs.forEach((edgeX, i) => {
+    const py = -halfH + i * pixel;
+    const edgeBlend = Math.min(1, i / 20, (edgeXs.length - 1 - i) / 20);
+    const crestDepth = Math.min(6, Math.abs(edgeX - (listSide === 1 ? halfW : -halfW)));
+    for (let s = 0; s < crestDepth; s += pixel) {
+      if (Math.random() > SINK_FOAM_DENSITY * foamFade * edgeBlend) continue;
+      const crestX = listSide === 1 ? edgeX + s : edgeX - s;
+      waterOverlay.fillStyle(0xdff3ff, Phaser.Math.FloatBetween(0.5, 0.85) * foamFade * edgeBlend);
+      cell(crestX, py);
+    }
+  });
+}
+
+// Advances the death sequence
+function updateSinking(ship, dt) {
+  ship.sinkElapsed += dt;
+  ship.sinkProgress = Phaser.Math.Clamp(ship.sinkElapsed / SINK_DURATION, 0, 1);
+
+  const now = ship.sprite.scene.time.now;
+  if (now - ship.waterOverlayLastUpdate >= 50) {
+    ship.waterOverlayLastUpdate = now;
+    redrawWaterOverlay(ship);
+  }
+
+  if (ship.sinkProgress >= 1) finishSinking(ship);
+}
+
+// Marks the ship sunk (removed from `ships` by the caller, after the
+// current forEach finishes — see update()) and tears down its visuals.
+function finishSinking(ship) {
+  ship.sprite.destroy();
+  ship.wakeSprite.destroy();
+  ship.turrets.forEach((turret) => turret.sprite.destroy());
+  ship.selectedRing.destroy();
+  ship.minRangeCircle.destroy();
+  ship.maxRangeCircle.destroy();
+  ship.healthBar.destroy();
+  ship.waterOverlay.destroy();
+  if (ship.pathLine) ship.pathLine.destroy();
+  if (ship.dispersionEllipse) ship.dispersionEllipse.destroy();
+
+  ship.sunk = true;
 }
 
 function isPointerOverSpeedHud(pointer) {
@@ -1254,8 +1429,7 @@ function setupCameraPanKeys(scene) {
   });
 }
 
-// Continuous WASD panning, polled every frame (not a keydown event) so
-// holding a key keeps panning rather than moving once per press.
+// Continuous WASD panning
 function updateCameraPan(camera, keys, dt) {
   let dx = 0;
   let dy = 0;
@@ -1285,15 +1459,7 @@ function setCameraZoom(camera, zoom) {
   });
 }
 
-// ---- Animation frame helpers ----
 // The hull is a single static image; only the wake sprite animates.
-//
-// computeShipFrame returns which WAKE frame the ship should currently be
-// showing (or null when the ship is stationary and has no wake). Both
-// restoreShipVisual (used after canceling a slowdown mid-order) and
-// syncShipAnimationFrame (called every tick) share it, so the frame-index
-// math lives in one place. Texture/animation keys and frame counts all come
-// from ship.stats, so this works unchanged for any ship type.
 function computeShipFrame(ship) {
   const { stats } = ship;
   if (!ship.moving) return null;
@@ -1364,6 +1530,14 @@ function syncShipAnimationFrame(ship) {
 }
 
 function updateShip(ship, dt) {
+  if (ship.sinking) {
+    updateSinking(ship, dt);
+    return; // sinking ships ignore steering, firing, and wake spawning
+  }
+  if (ship.health <= 0) {
+    beginSinking(ship);
+    return; // death sequence starts this frame; sinking logic picks up next frame
+  }
   const { sprite, stats } = ship;
 
   if (ship.moving && !ship.accelerating && !ship.slowingDown) {
@@ -1677,4 +1851,16 @@ function calculatePredictedPath(ship) {
 function updateWaypointMarkerScales(camera) {
   const scale = waypointSize / waypointSourceSize / camera.zoom;
   waypointMarkers.forEach((marker) => marker.setScale(scale));
+}
+
+//DEBUG FEATURES
+
+function killSelectedShips() {
+  if (selectedShips.length === 0) return;
+  // Copy first — beginSinking (called from updateShip next frame) removes
+  // ships from selectedShips as they die, which would otherwise mutate this
+  // array out from under the forEach.
+  [...selectedShips].forEach((ship) => {
+    ship.health = 0;
+  });
 }
