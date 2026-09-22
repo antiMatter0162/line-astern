@@ -1080,8 +1080,6 @@ function redrawWaterOverlay(ship) {
   const { stats, waterOverlay, listSide, waterlineSeed, sinkProgress } = ship;
   const time = ship.sinkElapsed;
   
-  console.log(ship.sprite.x.toFixed(3), ship.sprite.y.toFixed(3), ship.sprite.rotation.toFixed(5), sinkProgress.toFixed(4));
-
   const w = stats.displayWidth * 1.35;
   const h = stats.displayHeight * 1.15;
   const halfW = w / 2;
