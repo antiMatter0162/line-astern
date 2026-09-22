@@ -316,13 +316,17 @@ function createShip(scene, x, y, typeId) {
     .setDepth(3);
   selectedRing.setVisible(false);
 
-  const minRangeCircle = drawPixelatedCircleOutline(scene, stats.minFiringDistance)
+  const minRangeCircle = drawPixelatedCircleOutline(scene, stats.minFiringDistance,  0xEBBE4D)
+    .setDepth(1)
+    .setVisible(false);
+
+  const maxRangeCircle = drawPixelatedCircleOutline(scene, stats.maxFiringDistance, 0xFF0000)
     .setDepth(1)
     .setVisible(false);
 
   const healthBar = scene.add.graphics().setDepth(3.5).setVisible(false);
 
-  worldContainer.add([sprite, wakeSprite, selectedRing, minRangeCircle, healthBar]);
+  worldContainer.add([sprite, wakeSprite, selectedRing, minRangeCircle, maxRangeCircle, healthBar]);
 
   return {
     sprite,
@@ -332,6 +336,7 @@ function createShip(scene, x, y, typeId) {
     barrelLocalOffsets: computeBarrelLocalOffsets(stats),
     selectedRing,
     minRangeCircle,
+    maxRangeCircle,
     healthBar,
     target: null,
     waypoints: [],
@@ -501,7 +506,7 @@ function issueFireOrder(x, y) {
 
   selectedShips.forEach((ship) => {
     const distanceFromShip = Phaser.Math.Distance.Between(ship.sprite.x, ship.sprite.y, x, y);
-    if (distanceFromShip < ship.stats.minFiringDistance) {
+    if (distanceFromShip < ship.stats.minFiringDistance || distanceFromShip > ship.stats.maxFiringDistance) {
       flashCannotAimMessage(ship.sprite.scene);
       return; // leaves ship.fireTarget (and its dispersion ellipse) exactly as it was
     }
@@ -589,20 +594,21 @@ function getDispersionOffset(distance, shipRotation, curve, sigma) {
   };
 }
 
-function drawPixelatedCircleOutline(scene, radius, color = 0xEBBE4D, pixel = 2) {
+function drawPixelatedCircleOutline(scene, radius, color, pixel = 2) {
   const graphics = scene.add.graphics();
   const half = pixel / 2;
   const cell = (px, py) => graphics.fillRect(px - half, py - half, pixel, pixel);
-
   graphics.fillStyle(color, 0.9);
-  for (let angle = 0; angle <= Math.PI / 2; angle += 0.01) {
-    const px = Math.round((Math.cos(angle) * radius) / pixel) * pixel;
-    const py = Math.round((Math.sin(angle) * radius) / pixel) * pixel;
-    [1, -1].forEach((sx) => {
-      [1, -1].forEach((sy) => {
-        cell(sx * px, sy * py);
-      });
-    });
+
+  for (let x = 0; x <= radius; x += pixel) {
+    const y = Math.round(Math.sqrt(Math.max(0, radius * radius - x * x)) / pixel) * pixel;
+    const px = Math.round(x / pixel) * pixel;
+    [1, -1].forEach((sx) => [1, -1].forEach((sy) => cell(sx * px, sy * y)));
+  }
+  for (let y = 0; y <= radius; y += pixel) {
+    const x = Math.round(Math.sqrt(Math.max(0, radius * radius - y * y)) / pixel) * pixel;
+    const py = Math.round(y / pixel) * pixel;
+    [1, -1].forEach((sx) => [1, -1].forEach((sy) => cell(sx * x, sy * py)));
   }
 
   return graphics;
@@ -610,10 +616,6 @@ function drawPixelatedCircleOutline(scene, radius, color = 0xEBBE4D, pixel = 2) 
 
 // Draws a dispersion ellipse (fill + outline + axis ticks) in LOCAL
 // coordinates centered on (0,0) — it is NOT positioned or rotated here.
-// The caller uses the returned graphics object's own setPosition()/
-// setRotation() to place and orient it, which lets it track a turning ship
-// every frame via Phaser's transform instead of re-drawing every fillRect
-// each time (see updateDispersionEllipseTransform).
 function drawDispersionEllipseGraphics(scene, semiMajor, semiMinor) {
   const graphics = scene.add.graphics();
   const pixel = 2;
@@ -631,17 +633,19 @@ function drawDispersionEllipseGraphics(scene, semiMajor, semiMinor) {
     graphics.fillRect(-halfWidthPixels, py - half, halfWidthPixels * 2, pixel);
   }
 
-  // Outline — one quadrant, mirrored into the other three.
   graphics.fillStyle(0xff0000, 0.9);
-  for (let angle = 0; angle <= Math.PI / 2; angle += 0.01) {
-    const px = Math.round((Math.cos(angle) * semiMajor) / pixel) * pixel;
-    const py = Math.round((Math.sin(angle) * semiMinor) / pixel) * pixel;
-    [1, -1].forEach((sx) => {
-      [1, -1].forEach((sy) => {
-        cell(sx * px, sy * py);
-      });
-    });
-  }
+    for (let x = 0; x <= semiMajor; x += pixel) {
+      const yRaw = semiMinor * Math.sqrt(Math.max(0, 1 - (x / semiMajor) * (x / semiMajor)));
+      const y = Math.round(yRaw / pixel) * pixel;
+      const px = Math.round(x / pixel) * pixel;
+      [1, -1].forEach((sx) => [1, -1].forEach((sy) => cell(sx * px, sy * y)));
+    }
+    for (let y = 0; y <= semiMinor; y += pixel) {
+      const xRaw = semiMajor * Math.sqrt(Math.max(0, 1 - (y / semiMinor) * (y / semiMinor)));
+      const x = Math.round(xRaw / pixel) * pixel;
+      const py = Math.round(y / pixel) * pixel;
+      [1, -1].forEach((sx) => [1, -1].forEach((sy) => cell(sx * x, sy * py)));
+    }
 
   // Axis ticks
   const tickLength = Math.round(Math.min(semiMajor, semiMinor) * 0.5);
@@ -1273,7 +1277,7 @@ function updateCameraPan(camera, keys, dt) {
 }
 
 function setCameraZoom(camera, zoom) {
-  const nextZoom = Phaser.Math.Clamp(zoom, 0.6, 2.5);
+  const nextZoom = Phaser.Math.Clamp(zoom, 0.5, 2.2);
   camera.zoom = nextZoom;
   updateWaypointMarkerScales(camera);
   ships.forEach((ship) => {
@@ -1484,6 +1488,9 @@ function updateShip(ship, dt) {
 
   ship.minRangeCircle.setPosition(sprite.x, sprite.y);
   ship.minRangeCircle.setVisible(firingModeActive && selectedShips.includes(ship));
+
+  ship.maxRangeCircle.setPosition(sprite.x, sprite.y);
+  ship.maxRangeCircle.setVisible(firingModeActive && selectedShips.includes(ship));
 
   updateTurrets(ship);
   updateFiring(ship, dt);

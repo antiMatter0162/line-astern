@@ -49,10 +49,7 @@ const SHIP_TYPES = {};
 
 // Call once per class file: registerShipType({ id: "pennsylvania", ... }).
 // Anything the class file doesn't specify is filled in from
-// SHIP_TYPE_DEFAULTS; anything it DOES specify always wins. textures/
-// assetPaths/dispersionCurve are merged one level deep so overriding just
-// one field inside them (e.g. only dispersionCurve.horizontal) doesn't
-// silently drop the rest.
+// SHIP_TYPE_DEFAULTS; anything it DOES specify always wins.
 function registerShipType(typeDef) {
   if (!typeDef || !typeDef.id) {
     throw new Error("registerShipType: typeDef needs an id");
@@ -69,11 +66,7 @@ function registerShipType(typeDef) {
   };
 }
 
-// Wake animation keys are namespaced per type (e.g. "pennsylvania-wake-moving")
-// since different classes use different wake sheets and Phaser's animation
-// keys are global — two classes can't share one key once their underlying
-// textures differ. The hull itself no longer animates, so there are no
-// hull animation keys anymore.
+// Wake animation keys are namespaced per type
 function movingWakeAnimKey(stats) {
   return `${stats.id}-wake-moving`;
 }
@@ -84,10 +77,7 @@ function acceleratingWakeAnimKey(stats) {
   return `${stats.id}-wake-accelerating`;
 }
 
-// Barrel muzzle offsets depend on turretDisplaySize, which varies per
-// class, so these can't be precomputed once globally the way the old
-// BARREL_LOCAL_OFFSETS constant was — each ship computes and caches its
-// own copy at creation (see createShip in main.js).
+// Barrel muzzle offsets depend on turretDisplaySize
 function computeBarrelLocalOffsets(stats) {
   return [-1, 0, 1].map((i) => ({
     dx: i * stats.barrelNativeSpacing * (stats.turretDisplaySize / 360),

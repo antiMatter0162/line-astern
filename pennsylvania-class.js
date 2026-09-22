@@ -49,11 +49,6 @@ registerShipType({
   turnRate: Phaser.Math.DegToRad(20),
   collisionRadius: 28,
 
-  // Local offsets are in "unrotated ship space" (same axes as the hull
-  // texture: +y toward the stern, matching ship.sprite.rotation === 0, i.e.
-  // bow facing up). Bow pair (A, B) start rotated 180° from the native art
-  // (whose barrels point "down"); stern pair (B, A) keep native 0°
-  // rotation. Order is bow -> stern: A, B, B, A.
   turretMounts: [
     { type: "A", dx: 0, dy: -35, baseRotation: Math.PI }, // bow-most
     { type: "B", dx: 0, dy: -20, baseRotation: Math.PI }, // bow, superfiring
@@ -64,10 +59,12 @@ registerShipType({
   turretReloadSeconds: 10,
 
   minFiringDistance: 150,
+  maxFiringDistance: 3200,
+
   // vertical = across beam line, horizontal = perpendicular to beam line
   dispersionCurve: {
-    vertical: { base: 3, coefficient: 0.04, exponent: 0.85 },
-    horizontal: { base: 6, coefficient: 0.075, exponent: 0.95 },
+    vertical: { base: 3, coefficient: 0.06, exponent: 0.85 },
+    horizontal: { base: 6, coefficient: 0.085, exponent: 0.9 },
   },
   dispersionSigma: 1.8,
 
