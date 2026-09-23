@@ -282,7 +282,6 @@ function create() {
     });
 
     if (shiftHeld) {
-      // Multi-select: toggle the clicked ship in/out of the existing selection
       if (clickedShip) {
         const idx = selectedShips.indexOf(clickedShip);
         if (idx === -1) {
@@ -292,16 +291,16 @@ function create() {
           clickedShip.selectedRing.setVisible(false);
           selectedShips.splice(idx, 1);
         }
+        setFiringMode(false);
       }
-      // Shift-click on empty space: leave current selection untouched
     } else {
-      // Single select: clear existing selection, then select the clicked ship (if any)
       selectedShips.forEach((s) => s.selectedRing.setVisible(false));
       selectedShips = [];
       if (clickedShip) {
         clickedShip.selectedRing.setVisible(true);
         selectedShips.push(clickedShip);
       }
+      setFiringMode(false);
     }
 
     updateSpeedHud();
@@ -875,15 +874,6 @@ function isPointSubmerged(ship, worldX, worldY) {
   const depth = Phaser.Math.Clamp(w * ship.sinkProgress + offset, 0, w);
 
   const submerged = ship.listSide === 1 ? local.x >= halfW - depth : local.x <= -halfW + depth;
-  console.log("submerge-test", {
-    localX: local.x.toFixed(1),
-    localY: local.y.toFixed(1),
-    halfW: halfW.toFixed(1),
-    depth: depth.toFixed(1),
-    listSide: ship.listSide,
-    sinkProgress: ship.sinkProgress.toFixed(3),
-    submerged,
-  });
   return submerged;
 }
 
