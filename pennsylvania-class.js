@@ -1,16 +1,9 @@
 // Pennsylvania-Class Battleship.
-// Every number here is copied directly from what used to be hardcoded at
-// the top of main.js, so switching createShip() over to this type is meant
-// to be behavior-preserving — nothing here is new tuning, just relocated.
+
 registerShipType({
   id: "pennsylvania",
   label: "Pennsylvania-Class Battleship",
 
-  // Texture keys are namespaced per class so multiple ship types can be
-  // loaded into the same Phaser texture cache without collisions.
-  //
-  // The hull is a single static image. All ship animation lives in the two
-  // wake spritesheets, which are drawn as a separate sprite on top of it.
   textures: {
     hullStationary: "pennsylvania-hull-stationary",
     wakeMoving: "pennsylvania-wake",
@@ -26,16 +19,12 @@ registerShipType({
     turretB: "assets/Pennsylvania Turret B.png",
   },
 
-  // Size of the blank hull AND of every frame in both wake sheets — they
-  // must match exactly so the wake sprite lines up with the hull.
   hullFrameWidth: 960,
   hullFrameHeight: 2220,
 
-  // Frames actually used in each wake sheet (each sheet has an empty
-  // trailing cell that Phaser counts as a frame but we never play).
-  wakeMovingFrames: 7,        // Pennsylvania-Wake.png: 4 cols x 2 rows
-  wakeAccelerationFrames: 9,  // Pennsylvania-Acceleration.png: 5 cols x 2 rows,
-                              // frame 0 = full spray, last frame = nearly gone
+  wakeMovingFrames: 7,
+  wakeAccelerationFrames: 9, 
+
 
   displayWidth: 56,
   displayHeight: 130,
@@ -51,13 +40,16 @@ registerShipType({
   collisionRadius: 28,
 
   turretMounts: [
-    { type: "A", dx: 0, dy: -35, baseRotation: Math.PI }, // bow-most
-    { type: "B", dx: 0, dy: -20, baseRotation: Math.PI }, // bow, superfiring
-    { type: "B", dx: 0, dy: 23.5, baseRotation: 0 }, // stern, superfiring
-    { type: "A", dx: 0, dy: 38, baseRotation: 0 }, // stern-most
+    { type: "A", dx: 0, dy: -35, baseRotation: Math.PI, arc: "front" }, // bow-most
+    { type: "B", dx: 0, dy: -20, baseRotation: Math.PI, arc: "front" }, // bow, superfiring
+    { type: "B", dx: 0, dy: 23.5, baseRotation: 0,       arc: "back"  }, // stern, superfiring
+    { type: "A", dx: 0, dy: 38, baseRotation: 0,         arc: "back"  }, // stern-most
   ],
   turretTraverse: Phaser.Math.DegToRad(0.15),
   turretReloadSeconds: 10,
+
+  frontFiringArc: Phaser.Math.DegToRad(260),
+  backFiringArc: Phaser.Math.DegToRad(235),
 
   minFiringDistance: 150,
   maxFiringDistance: 3200,

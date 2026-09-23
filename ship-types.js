@@ -5,8 +5,7 @@
 //   2. ship-types.js (this file)
 //   3. every ship class file (pennsylvania-class.js, etc.)
 //   4. main.js
-// main.js reads ship stats out of SHIP_TYPES; it never hardcodes a class's
-// numbers itself.
+// main.js reads ship stats out of SHIP_TYPES
 
 // Fallback values so a class file only has to specify what makes it unique
 
@@ -28,6 +27,9 @@ const SHIP_TYPE_DEFAULTS = {
   turretReloadSeconds: 12,
   minFiringDistance: 150,
 
+  frontFiringArc: Phaser.Math.DegToRad(150),
+  backFiringArc: Phaser.Math.DegToRad(150),
+
   dispersionCurve: {
     vertical: { base: 4, coefficient: 0.05, exponent: 0.9 },
     horizontal: { base: 7, coefficient: 0.08, exponent: 0.95 },
@@ -37,13 +39,8 @@ const SHIP_TYPE_DEFAULTS = {
   barrelNativeSpacing: 60,
   barrelNativeMuzzleDy: 164,
 
-  // Size of the static hull image and of every wake-sheet frame.
   hullFrameWidth: 960,
   hullFrameHeight: 2220,
-
-  // NOTE: wakeMovingFrames and wakeAccelerationFrames have no default on
-  // purpose — they depend on each class's wake art, so every class file
-  // must set them itself (see pennsylvania-class.js).
 };
 
 const SHIP_TYPES = {};

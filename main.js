@@ -243,6 +243,12 @@ function create() {
   this.input.keyboard.on("keydown-X", stopFiring);
   this.input.keyboard.on("keydown-S", stopSelectedShips);
   //this.input.keyboard.on("keydown-PERIOD", killSelectedShips); // debug: force-sink selected ships
+  this.input.keyboard.on("keydown-P", () => {
+    if (!firingModeActive) return; // arc overlay only makes sense while firing mode is on
+    firingArcDebugActive = !firingArcDebugActive;
+    if (!firingArcDebugActive) clearFiringArcDebug();
+    if (firingArcDebugActive) drawFiringArcDebug(this);
+  });
 
   this.input.on("pointerdown", (pointer) => {
     if (pointer.middleButtonDown()) {
@@ -333,6 +339,7 @@ function update(time, delta) {
   resolveShipCollisions(dt);
   updateShells(dt);
   updateWakes(dt);
+  if (firingArcDebugActive) drawFiringArcDebug(this);
 }
 
 // ---- Ship creation & behavior ----
@@ -436,12 +443,32 @@ function createTurrets(scene, shipX, shipY, stats) {
       sprite,
       dx: mount.dx,
       dy: mount.dy,
-      // Fixed offset from the ship's own heading
+      arc: mount.arc,
       rotationOffset: mount.baseRotation,
       reloadTimer: 0,
       onTarget: false,
     };
   });
+}
+
+function clampAngleToTurretArc(ship, turret, desiredRotation) {
+  const reference = ship.sprite.rotation + turret.rotationOffset;
+  const halfArc = (turret.arc === "back" ? ship.stats.backFiringArc : ship.stats.frontFiringArc) / 2;
+
+  const localAngle = Phaser.Math.Angle.Wrap(desiredRotation - reference);
+  const withinArc = Math.abs(localAngle) <= halfArc;
+
+  let clampedLocal;
+  if (withinArc) {
+    clampedLocal = localAngle;
+  } else {
+    const currentLocal = Phaser.Math.Angle.Wrap(turret.sprite.rotation - reference);
+    const distToPositiveEdge = Math.abs(Phaser.Math.Angle.Wrap(halfArc - currentLocal));
+    const distToNegativeEdge = Math.abs(Phaser.Math.Angle.Wrap(-halfArc - currentLocal));
+    clampedLocal = distToPositiveEdge <= distToNegativeEdge ? halfArc : -halfArc;
+  }
+
+  return { angle: Phaser.Math.Angle.Wrap(reference + clampedLocal), withinArc };
 }
 
 const HEALTH_BAR_WIDTH = 60;
@@ -485,47 +512,52 @@ function updateTurrets(ship) {
   ship.turrets.forEach((turret) => {
     const worldOffsetX = turret.dx * cos - turret.dy * sin;
     const worldOffsetY = turret.dx * sin + turret.dy * cos;
-
     turret.sprite.x = ship.sprite.x + worldOffsetX;
     turret.sprite.y = ship.sprite.y + worldOffsetY;
 
+    const reference = ship.sprite.rotation + turret.rotationOffset;
+    const halfArc = (turret.arc === "back" ? ship.stats.backFiringArc : ship.stats.frontFiringArc) / 2;
+
+    const currentLocal = Phaser.Math.Clamp(
+      Phaser.Math.Angle.Wrap(turret.sprite.rotation - reference),
+      -halfArc,
+      halfArc,
+    );
+
+    let targetLocal;
+    let withinArc;
+
     if (ship.fireTarget) {
-      const angleToTarget = Phaser.Math.Angle.Between(
-        turret.sprite.x,
-        turret.sprite.y,
-        ship.fireTarget.x,
-        ship.fireTarget.y
+
+      const rawAngleToTarget = Phaser.Math.Angle.Between(
+        turret.sprite.x, turret.sprite.y, ship.fireTarget.x, ship.fireTarget.y
       ) - Math.PI / 2;
+      const localAngle = Phaser.Math.Angle.Wrap(rawAngleToTarget - reference);
+      withinArc = Math.abs(localAngle) <= halfArc;
 
-      const traverseDelta = Phaser.Math.Angle.Wrap(
-        angleToTarget - turret.sprite.rotation
-      );
-
-      turret.onTarget = Math.abs(traverseDelta) <= maxTraverse;
-
-      turret.sprite.rotation += Phaser.Math.Clamp(
-        traverseDelta,
-        -maxTraverse,
-        maxTraverse
-      );
-    } else {
-      const homeRotation = ship.sprite.rotation + turret.rotationOffset;
-      const returnDelta = Phaser.Math.Angle.Wrap(
-        homeRotation - turret.sprite.rotation
-      );
-
-      turret.sprite.rotation += Phaser.Math.Clamp(
-        returnDelta,
-        -maxTraverse,
-        maxTraverse
-      );
-
-      if (Math.abs(returnDelta) <= maxTraverse) {
-        turret.sprite.rotation = homeRotation;
+      if (withinArc) {
+        targetLocal = localAngle;
+      } else {
+        const shipAngleToTarget = Phaser.Math.Angle.Between(
+          ship.sprite.x, ship.sprite.y, ship.fireTarget.x, ship.fireTarget.y
+        ) - Math.PI / 2;
+        const groupLocalAngle = Phaser.Math.Angle.Wrap(shipAngleToTarget - reference);
+        targetLocal = groupLocalAngle >= 0 ? halfArc : -halfArc;
       }
-
-      turret.onTarget = false;
+    } else {
+      targetLocal = 0;
+      withinArc = false;
     }
+
+    const traverseDelta = targetLocal - currentLocal;
+    turret.onTarget = Boolean(ship.fireTarget) && withinArc && Math.abs(traverseDelta) <= maxTraverse;
+
+    const nextLocal = Phaser.Math.Clamp(
+      currentLocal + Phaser.Math.Clamp(traverseDelta, -maxTraverse, maxTraverse),
+      -halfArc,
+      halfArc,
+    );
+    turret.sprite.rotation = reference + nextLocal;
   });
 }
 
@@ -540,6 +572,11 @@ function createFiringHud(scene) {
 function setFiringMode(active) {
   firingModeActive = active;
   if (firingModeIndicator) firingModeIndicator.setVisible(firingModeActive);
+
+  if (!firingModeActive && firingArcDebugActive) {
+    firingArcDebugActive = false;
+    clearFiringArcDebug();
+  }
 }
 
 function toggleFiringMode() {
@@ -1336,8 +1373,6 @@ function updateSinking(ship, dt) {
   if (ship.sinkProgress >= 1) finishSinking(ship);
 }
 
-// Marks the ship sunk (removed from `ships` by the caller, after the
-// current forEach finishes — see update()) and tears down its visuals.
 function finishSinking(ship) {
   ship.sprite.destroy();
   ship.wakeSprite.destroy();
@@ -2037,5 +2072,88 @@ function killSelectedShips() {
   // array out from under the forEach.
   [...selectedShips].forEach((ship) => {
     ship.health = 0;
+  });
+}
+
+function drawPixelatedArcOutline(scene, radius, startAngle, endAngle, color, pixel = 2) {
+  const graphics = scene.add.graphics();
+  const half = pixel / 2;
+  const cell = (px, py) => graphics.fillRect(px - half, py - half, pixel, pixel);
+  graphics.fillStyle(color, 0.9);
+
+  const angleStep = pixel / radius;
+  for (let angle = startAngle; angle <= endAngle; angle += angleStep) {
+    const x = Math.round((Math.cos(angle) * radius) / pixel) * pixel;
+    const y = Math.round((Math.sin(angle) * radius) / pixel) * pixel;
+    cell(x, y);
+  }
+  
+  const xEnd = Math.round((Math.cos(endAngle) * radius) / pixel) * pixel;
+  const yEnd = Math.round((Math.sin(endAngle) * radius) / pixel) * pixel;
+  cell(xEnd, yEnd);
+
+  [startAngle, endAngle].forEach((angle) => {
+    const cos = Math.cos(angle);
+    const sin = Math.sin(angle);
+    for (let r = 0; r <= radius; r += pixel) {
+      const x = Math.round((cos * r) / pixel) * pixel;
+      const y = Math.round((sin * r) / pixel) * pixel;
+      cell(x, y);
+    }
+  });
+
+  return graphics;
+}
+
+let firingArcDebugActive = false;
+let firingArcDebugGraphics = [];
+
+function clearFiringArcDebug() {
+  firingArcDebugGraphics.forEach((g) => g.destroy());
+  firingArcDebugGraphics = [];
+}
+
+function drawFiringArcDebug(scene) {
+  clearFiringArcDebug();
+
+  selectedShips.forEach((ship) => {
+    if (ship.sinking) return;
+    const radius = 400;
+
+    ship.turrets.forEach((turret) => {
+      const rotationReference = ship.sprite.rotation + turret.rotationOffset;
+      const firingCenterAngle = rotationReference + Math.PI / 2;
+      const halfArc = (turret.arc === "back" ? ship.stats.backFiringArc : ship.stats.frontFiringArc) / 2;
+      const color = turret.arc === "back" ? 0x00aaff : 0xffaa00;
+
+      const fillGraphics = scene.add.graphics().setDepth(5);
+      fillGraphics.fillStyle(color, 0.07);
+      fillGraphics.beginPath();
+      fillGraphics.moveTo(turret.sprite.x, turret.sprite.y);
+      fillGraphics.arc(turret.sprite.x, turret.sprite.y, radius, firingCenterAngle - halfArc, firingCenterAngle + halfArc, false);
+      fillGraphics.lineTo(turret.sprite.x, turret.sprite.y);
+      fillGraphics.closePath();
+      fillGraphics.fillPath();
+      worldContainer.add(fillGraphics);
+      firingArcDebugGraphics.push(fillGraphics);
+
+      const outlineGraphics = drawPixelatedArcOutline(
+        scene, radius, firingCenterAngle - halfArc, firingCenterAngle + halfArc, color,
+      ).setDepth(5);
+      outlineGraphics.setPosition(turret.sprite.x, turret.sprite.y);
+      worldContainer.add(outlineGraphics);
+      firingArcDebugGraphics.push(outlineGraphics);
+
+      const actualFiringAngle = turret.sprite.rotation + Math.PI / 2;
+      const facingGraphics = scene.add.graphics().setDepth(5);
+      facingGraphics.lineStyle(2, 0xffffff, 0.3);
+      facingGraphics.lineBetween(
+        turret.sprite.x, turret.sprite.y,
+        turret.sprite.x + Math.cos(actualFiringAngle) * 100,
+        turret.sprite.y + Math.sin(actualFiringAngle) * 100,
+      );
+      worldContainer.add(facingGraphics);
+      firingArcDebugGraphics.push(facingGraphics);
+    });
   });
 }
