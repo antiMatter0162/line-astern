@@ -16,6 +16,7 @@ const SHIP_TYPE_DEFAULTS = {
   turretDisplaySize: 21,
 
   maxHealth: 25000,
+  shellAlpha: 600,
 
   maxSpeed: 80,
   acceleration: 100,
@@ -23,7 +24,7 @@ const SHIP_TYPE_DEFAULTS = {
   turnRate: Phaser.Math.DegToRad(18),
   collisionRadius: 26,
 
-  turretTraverse: Phaser.Math.DegToRad(0.5),
+  turretTraverse: Phaser.Math.DegToRad(0.2),
   turretReloadSeconds: 12,
   minFiringDistance: 150,
 

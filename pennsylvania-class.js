@@ -42,6 +42,7 @@ registerShipType({
   turretDisplaySize: 21,
   
   maxHealth: 52000,
+  shellAlpha: 2000,
 
   maxSpeed: 90,
   acceleration: 108,
@@ -55,7 +56,7 @@ registerShipType({
     { type: "B", dx: 0, dy: 23.5, baseRotation: 0 }, // stern, superfiring
     { type: "A", dx: 0, dy: 38, baseRotation: 0 }, // stern-most
   ],
-  turretTraverse: Phaser.Math.DegToRad(0.25),
+  turretTraverse: Phaser.Math.DegToRad(0.15),
   turretReloadSeconds: 10,
 
   minFiringDistance: 150,
@@ -63,10 +64,10 @@ registerShipType({
 
   // vertical = across beam line, horizontal = perpendicular to beam line
   dispersionCurve: {
-    vertical: { base: 3, coefficient: 0.06, exponent: 0.85 },
-    horizontal: { base: 6, coefficient: 0.085, exponent: 0.9 },
+    vertical: { base: 3, coefficient: 0.07, exponent: 0.9 },
+    horizontal: { base: 6, coefficient: 0.095, exponent: 1 },
   },
-  dispersionSigma: 1.8,
+  dispersionSigma: 1.4,
 
   barrelNativeSpacing: 60,
   barrelNativeMuzzleDy: 164,

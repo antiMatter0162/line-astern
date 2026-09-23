@@ -61,6 +61,12 @@ const CAMERA_PAN_SPEED = 450;
 // Turret A/B mounts render at different depths
 const TURRET_DEPTH = { A: 2.4, B: 2.6 };
 
+const SINKING_HULL_DEPTH = 1.2;
+const SINKING_TURRET_DEPTH = 1.5;
+const SINKING_WATER_OVERLAY_DEPTH = 1.6;
+const SINKING_EXPLOSION_DEPTH = 1.7;
+const ORDER_MARKER_DEPTH = 1.8;
+
 // ---- Firing mode ----
 let firingModeActive = false;
 let firingModeIndicator = null;
@@ -79,6 +85,9 @@ const SINK_PIXEL = 2;
 const SINK_JITTER = 0.22;
 const SINK_LIST_ANGLE = 0.5; 
 const SINK_FOAM_DENSITY = 0.35;
+
+const SPLASH_DISPLAY_SIZE = 40;
+const HIT_EXPLOSION_DISPLAY_SIZE = 25;
 
 // Naval "bell order" style speed settings
 const SPEED_ORDERS = [
@@ -101,6 +110,14 @@ function preload() {
   this.load.spritesheet("explosion", "assets/Explosion.png", {
     frameWidth: 720,
     frameHeight: 720,
+  });
+  this.load.spritesheet("splash", "assets/Splash.png", {
+    frameWidth: 480,
+    frameHeight: 480,
+  });
+  this.load.spritesheet("hit-explosion", "assets/Hit-Explosion.png", {
+    frameWidth: 480,
+    frameHeight: 480,
   });
 
   Object.values(SHIP_TYPES).forEach((stats) => {
@@ -193,6 +210,18 @@ function create() {
      this.anims.create({
       key: "explosion",
       frames: this.anims.generateFrameNumbers("explosion", { start: 0, end: 11 }),
+      frameRate: 12,
+      repeat: 0,
+    });
+    this.anims.create({
+      key: "splash",
+      frames: this.anims.generateFrameNumbers("splash", { start: 0, end: 8 }),
+      frameRate: 12,
+      repeat: 0,
+    });
+    this.anims.create({
+      key: "hit-explosion",
+      frames: this.anims.generateFrameNumbers("hit-explosion", { start: 0, end: 9 }),
       frameRate: 12,
       repeat: 0,
     });
@@ -335,11 +364,11 @@ function createShip(scene, x, y, typeId) {
   selectedRing.setVisible(false);
 
   const minRangeCircle = drawPixelatedCircleOutline(scene, stats.minFiringDistance,  0xEBBE4D)
-    .setDepth(1)
+    .setDepth(4)
     .setVisible(false);
 
   const maxRangeCircle = drawPixelatedCircleOutline(scene, stats.maxFiringDistance, 0xFF0000)
-    .setDepth(1)
+    .setDepth(4)
     .setVisible(false);
 
   const healthBar = scene.add.graphics().setDepth(3.5).setVisible(false);
@@ -577,7 +606,7 @@ function fireTurretVolley(ship, turret) {
       ship.stats.dispersionCurve,
       ship.stats.dispersionSigma
     );
-    spawnShell(scene, muzzleX, muzzleY, targetX + dispersion.x, targetY + dispersion.y);
+    spawnShell(scene, muzzleX, muzzleY, targetX + dispersion.x, targetY + dispersion.y, ship.stats.shellAlpha);
   });
 }
 
@@ -647,7 +676,7 @@ function drawDispersionEllipseGraphics(scene, semiMajor, semiMinor) {
   const graphics = scene.add.graphics();
   const pixel = 2;
   const half = pixel / 2;
-  graphics.setDepth(1.5);
+  graphics.setDepth(4);
 
   const cell = (px, py) => graphics.fillRect(px - half, py - half, pixel, pixel);
 
@@ -685,11 +714,7 @@ function drawDispersionEllipseGraphics(scene, semiMajor, semiMinor) {
 }
 
 // (Re)builds a ship's dispersion ellipse sized for its current range to
-// target, and immediately positions/orients it. Called when a fire order is
-// (re)issued, and again from updateDispersionEllipseTransform whenever the
-// ship's range to target has drifted enough to meaningfully change the
-// dispersion size (e.g. the ship maneuvering while continuing to fire at a
-// fixed point).
+// target, and immediately positions/orients it.
 function refreshShipDispersionEllipse(ship) {
   if (!ship.fireTarget) return;
 
@@ -743,14 +768,21 @@ function updateDispersionEllipseVisibility() {
   });
 }
 
-function spawnShell(scene, x, y, targetX, targetY) {
+function spawnShell(scene, x, y, targetX, targetY, damage) {
   const angle = Phaser.Math.Angle.Between(x, y, targetX, targetY);
   const sprite = scene.add.sprite(x, y, "shell")
     .setDisplaySize(shellDisplayWidth, shellDisplayHeight)
     .setRotation(angle + Math.PI / 2)
     .setDepth(2.8);
   worldContainer.add(sprite);
-  activeShells.push({ sprite, vx: Math.cos(angle) * SHELL_SPEED, vy: Math.sin(angle) * SHELL_SPEED, targetX, targetY });
+  activeShells.push({
+    sprite,
+    vx: Math.cos(angle) * SHELL_SPEED,
+    vy: Math.sin(angle) * SHELL_SPEED,
+    targetX,
+    targetY,
+    damage,
+  });
 }
 
 function updateShells(dt) {
@@ -759,6 +791,7 @@ function updateShells(dt) {
     const remaining = Phaser.Math.Distance.Between(shell.sprite.x, shell.sprite.y, shell.targetX, shell.targetY);
     const step = SHELL_SPEED * dt;
     if (step >= remaining) {
+      resolveShellSplash(shell);
       shell.sprite.destroy();
       activeShells.splice(i, 1);
       continue;
@@ -766,6 +799,127 @@ function updateShells(dt) {
     shell.sprite.x += shell.vx * dt;
     shell.sprite.y += shell.vy * dt;
   }
+}
+
+function toShipLocal(ship, worldX, worldY) {
+  const dx = worldX - ship.sprite.x;
+  const dy = worldY - ship.sprite.y;
+  const cos = Math.cos(ship.sprite.rotation);
+  const sin = Math.sin(ship.sprite.rotation);
+  return {
+    x: dx * cos + dy * sin,
+    y: -dx * sin + dy * cos,
+  };
+}
+
+function isHullHitAt(ship, worldX, worldY) {
+  const local = toShipLocal(ship, worldX, worldY);
+  const texScaleX = ship.sprite.width / ship.stats.displayWidth;
+  const texScaleY = ship.sprite.height / ship.stats.displayHeight;
+  const texX = Math.round(local.x * texScaleX + ship.sprite.width / 2);
+  const texY = Math.round(local.y * texScaleY + ship.sprite.height / 2);
+
+  if (texX < 0 || texY < 0 || texX >= ship.sprite.width || texY >= ship.sprite.height) return false;
+
+  const alpha = ship.sprite.scene.textures.getPixelAlpha(texX, texY, ship.stats.textures.hullStationary);
+  return alpha !== null && alpha > 0;
+}
+
+function isPointSubmerged(ship, worldX, worldY) {
+  const local = toShipLocal(ship, worldX, worldY);
+  const w = ship.stats.displayWidth * 1.35;
+  const h = ship.stats.displayHeight * 1.15;
+  const halfW = w / 2;
+  const halfH = h / 2;
+
+  const normalizedY = Phaser.Math.Clamp(local.y / halfH, -1, 1);
+  const waveAmplitude = w * SINK_JITTER * (1 - ship.sinkProgress * 0.6);
+  const offset = waterlineOffset(ship.waterlineSeed, normalizedY, ship.sinkElapsed) * waveAmplitude;
+  const depth = Phaser.Math.Clamp(w * ship.sinkProgress + offset, 0, w);
+
+  const submerged = ship.listSide === 1 ? local.x >= halfW - depth : local.x <= -halfW + depth;
+  console.log("submerge-test", {
+    localX: local.x.toFixed(1),
+    localY: local.y.toFixed(1),
+    halfW: halfW.toFixed(1),
+    depth: depth.toFixed(1),
+    listSide: ship.listSide,
+    sinkProgress: ship.sinkProgress.toFixed(3),
+    submerged,
+  });
+  return submerged;
+}
+
+function isHullHitAt(ship, worldX, worldY) {
+  const dx = worldX - ship.sprite.x;
+  const dy = worldY - ship.sprite.y;
+  const cos = Math.cos(ship.sprite.rotation);
+  const sin = Math.sin(ship.sprite.rotation);
+
+  const localX = dx * cos + dy * sin;
+  const localY = -dx * sin + dy * cos;
+
+  const texScaleX = ship.sprite.width / ship.stats.displayWidth;
+  const texScaleY = ship.sprite.height / ship.stats.displayHeight;
+  const texX = Math.round(localX * texScaleX + ship.sprite.width / 2);
+  const texY = Math.round(localY * texScaleY + ship.sprite.height / 2);
+
+  if (texX < 0 || texY < 0 || texX >= ship.sprite.width || texY >= ship.sprite.height) return false;
+
+  const alpha = ship.sprite.scene.textures.getPixelAlpha(texX, texY, ship.stats.textures.hullStationary);
+  return alpha !== null && alpha > 0;
+}
+
+function resolveShellSplash(shell) {
+  const scene = shell.sprite.scene;
+  let resolved = false;
+
+  ships.forEach((ship) => {
+    if (resolved) return;
+
+    const dx = shell.targetX - ship.sprite.x;
+    const dy = shell.targetY - ship.sprite.y;
+    const maxReach = Math.max(ship.stats.displayWidth, ship.stats.displayHeight) * 0.6;
+    if (dx * dx + dy * dy > maxReach * maxReach) return;
+
+    if (!isHullHitAt(ship, shell.targetX, shell.targetY)) return;
+
+    if (ship.sinking) {
+      // Already dying — no further damage, just pick the effect that
+      // matches whichever part of the hull got hit.
+      if (isPointSubmerged(ship, shell.targetX, shell.targetY)) {
+        spawnSplash(scene, shell.targetX, shell.targetY);
+      } else {
+        spawnHitExplosion(scene, shell.targetX, shell.targetY);
+      }
+    } else {
+      ship.health = Math.max(0, ship.health - shell.damage);
+      spawnHitExplosion(scene, shell.targetX, shell.targetY);
+    }
+    resolved = true;
+  });
+
+  if (!resolved) {
+    spawnSplash(scene, shell.targetX, shell.targetY);
+  }
+}
+
+function spawnSplash(scene, x, y) {
+  const sprite = scene.add.sprite(x, y, "splash")
+    .setDisplaySize(SPLASH_DISPLAY_SIZE, SPLASH_DISPLAY_SIZE)
+    .setDepth(1.9); // above ocean/markers, still well under any hull
+  worldContainer.add(sprite);
+  sprite.play("splash");
+  sprite.once("animationcomplete", () => sprite.destroy());
+}
+
+function spawnHitExplosion(scene, x, y) {
+  const sprite = scene.add.sprite(x, y, "hit-explosion")
+    .setDisplaySize(HIT_EXPLOSION_DISPLAY_SIZE, HIT_EXPLOSION_DISPLAY_SIZE)
+    .setDepth(2.9); // above hulls (2) and shells (2.8), below turrets (2.4+ already covers this ship's own turrets since it's higher — see note below)
+  worldContainer.add(sprite);
+  sprite.play("hit-explosion");
+  sprite.once("animationcomplete", () => sprite.destroy());
 }
 
 // ---- Wake trail ----
@@ -1030,10 +1184,13 @@ function beginSinking(ship) {
   if (ship.sinking) return;
   const scene = ship.sprite.scene;
 
+  ship.sprite.setDepth(SINKING_HULL_DEPTH);
+  ship.turrets.forEach((turret) => turret.sprite.setDepth(SINKING_TURRET_DEPTH));
+
   const explosionSize = Math.max(ship.stats.displayWidth, ship.stats.displayHeight) * 0.6;
   const explosionSprite = scene.add.sprite(ship.sprite.x, ship.sprite.y, "explosion")
     .setDisplaySize(explosionSize, explosionSize)
-    .setDepth(3.6); // above hull/turrets/health bar, below HUD text
+    .setDepth(SINKING_EXPLOSION_DEPTH); // above hull/turrets/health bar, below HUD text
   worldContainer.add(explosionSprite);
   explosionSprite.play("explosion");
   explosionSprite.once("animationcomplete", () => explosionSprite.destroy());
@@ -1081,7 +1238,7 @@ function beginSinking(ship) {
   };
 
 
-  ship.waterOverlay = scene.add.graphics().setDepth(2.75); // above turrets (2.4–2.6)
+  ship.waterOverlay = scene.add.graphics().setDepth(SINKING_WATER_OVERLAY_DEPTH);
   worldContainer.add(ship.waterOverlay);
 }
 
@@ -1322,7 +1479,8 @@ function issueMoveOrder(x, y, append) {
   const waypoint = { x, y };
   waypoint.marker = scene.add.image(x, y, "waypoint")
     .setDisplaySize(waypointSize, waypointSize)
-    .setDepth(1);
+    .setDepth(ORDER_MARKER_DEPTH);
+
   worldContainer.add(waypoint.marker);
   waypointMarkers.push(waypoint.marker);
   updateWaypointMarkerScales(scene.cameras.main);
@@ -1331,7 +1489,7 @@ function issueMoveOrder(x, y, append) {
     ship.waypoints.push(waypoint);
     if (!ship.target) advanceToNextWaypoint(ship);
     if (!ship.pathLine) {
-      ship.pathLine = scene.add.graphics().setDepth(1);
+      ship.pathLine = scene.add.graphics().setDepth(ORDER_MARKER_DEPTH);
       worldContainer.add(ship.pathLine);
     }
     updatePathLine(ship);
