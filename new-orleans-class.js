@@ -55,10 +55,10 @@ registerShipType({
 
   // vertical = across beam line, horizontal = perpendicular to beam line
   dispersionCurve: {
-    vertical: { base: 2.5, coefficient: 0.065, exponent: 0.85 },
-    horizontal: { base: 5, coefficient: 0.090, exponent: 0.95 },
+    vertical: { base: 3, coefficient: 0.065, exponent: 0.9 },
+    horizontal: { base: 5.5, coefficient: 0.090, exponent: 0.98 },
   },
-  dispersionSigma: 1.9,
+  dispersionSigma: 1.65,
 
   barrelNativeSpacing: 60,
   barrelNativeMuzzleDy: 164,
