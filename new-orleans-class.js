@@ -40,14 +40,14 @@ registerShipType({
   collisionRadius: 28,
 
   turretMounts: [
-    { type: "B", dx: 0, dy: -34, baseRotation: Math.PI, arc: "front" }, // bow-most
-    { type: "A", dx: 0, dy: -25, baseRotation: Math.PI, arc: "front" }, // bow, superfiring
+    { type: "B", dx: 0, dy: -35, baseRotation: Math.PI, arc: "front" }, // bow-most
+    { type: "A", dx: 0, dy: -25.5, baseRotation: Math.PI, arc: "front" }, // bow, superfiring
     { type: "A", dx: 0, dy: 38, baseRotation: 0,         arc: "back"  }, // stern-most
   ],
   turretTraverse: Phaser.Math.DegToRad(0.21),
-  turretReloadSeconds: 6.5,
+  turretReloadSeconds: 7.5,
 
-  frontFiringArc: Phaser.Math.DegToRad(290),
+  frontFiringArc: Phaser.Math.DegToRad(265),
   backFiringArc: Phaser.Math.DegToRad(280),
 
   minFiringDistance: 100,
