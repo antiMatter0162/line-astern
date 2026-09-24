@@ -31,7 +31,7 @@ registerShipType({
   turretDisplaySize: 17,
   
   maxHealth: 20000,
-  shellAlpha: 850,
+  shellAlpha: 900,
 
   maxSpeed: 125,
   acceleration: 90,
