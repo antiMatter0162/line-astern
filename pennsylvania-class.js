@@ -31,7 +31,7 @@ registerShipType({
   turretDisplaySize: 21,
   
   maxHealth: 52000,
-  shellAlpha: 2000,
+  shellAlpha: 2200,
 
   maxSpeed: 90,
   acceleration: 108,
@@ -40,13 +40,13 @@ registerShipType({
   collisionRadius: 28,
 
   turretMounts: [
-    { type: "A", dx: 0, dy: -35, baseRotation: Math.PI, arc: "front" }, // bow-most
-    { type: "B", dx: 0, dy: -20, baseRotation: Math.PI, arc: "front" }, // bow, superfiring
-    { type: "B", dx: 0, dy: 23.5, baseRotation: 0,       arc: "back"  }, // stern, superfiring
-    { type: "A", dx: 0, dy: 38, baseRotation: 0,         arc: "back"  }, // stern-most
+    { type: "B", dx: 0, dy: -35, baseRotation: Math.PI, arc: "front" }, // bow-most
+    { type: "A", dx: 0, dy: -20, baseRotation: Math.PI, arc: "front" }, // bow, superfiring
+    { type: "A", dx: 0, dy: 23.5, baseRotation: 0,       arc: "back"  }, // stern, superfiring
+    { type: "B", dx: 0, dy: 38, baseRotation: 0,         arc: "back"  }, // stern-most
   ],
   turretTraverse: Phaser.Math.DegToRad(0.15),
-  turretReloadSeconds: 10,
+  turretReloadSeconds: 20,
 
   frontFiringArc: Phaser.Math.DegToRad(260),
   backFiringArc: Phaser.Math.DegToRad(235),

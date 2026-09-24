@@ -59,7 +59,7 @@ const WAKE_FPS = 12;
 const CAMERA_PAN_SPEED = 450;
 
 // Turret A/B mounts render at different depths
-const TURRET_DEPTH = { A: 2.4, B: 2.6 };
+const TURRET_DEPTH = { A: 2.6, B: 2.4 };
 
 const SINKING_HULL_DEPTH = 1.2;
 const SINKING_TURRET_DEPTH = 1.5;
@@ -229,7 +229,8 @@ function create() {
 
   // Create a small starting fleet
   ships = [createShip(this, 6400, 4000, "pennsylvania"),
-          createShip(this, 5400, 4000, "pennsylvania")];
+          createShip(this, 5400, 4000, "pennsylvania"),
+          createShip(this, 4400, 4000, "new-orleans")];
 
   // Speed order shortcuts: 1=Ahead 1/3 ... 5=Ahead Flank
   SPEED_ORDERS.forEach((order, index) => {
