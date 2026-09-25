@@ -504,10 +504,10 @@ function updateHealthBar(ship) {
 
 // Repositions and reorients a ship's turrets to follow the hull
 
-function updateTurrets(ship) {
+function updateTurrets(ship, dt) {
   const cos = Math.cos(ship.sprite.rotation);
   const sin = Math.sin(ship.sprite.rotation);
-  const maxTraverse = ship.stats.turretTraverse;
+  const maxTraverse = ship.stats.turretTraverse * dt;
 
   ship.turrets.forEach((turret) => {
     const worldOffsetX = turret.dx * cos - turret.dy * sin;
@@ -1867,7 +1867,7 @@ function updateShip(ship, dt) {
   ship.maxRangeCircle.setPosition(sprite.x, sprite.y);
   ship.maxRangeCircle.setVisible(firingModeActive && selectedShips.includes(ship));
 
-  updateTurrets(ship);
+  updateTurrets(ship, dt);
   updateFiring(ship, dt);
   updateDispersionEllipseTransform(ship);
   updateShipWake(ship, dt);

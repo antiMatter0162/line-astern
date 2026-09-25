@@ -30,7 +30,7 @@ registerShipType({
   displayHeight: 130,
   turretDisplaySize: 17,
   
-  maxHealth: 20000,
+  maxHealth: 21000,
   shellAlpha: 900,
 
   maxSpeed: 125,
@@ -44,7 +44,7 @@ registerShipType({
     { type: "A", dx: 0, dy: -25.5, baseRotation: Math.PI, arc: "front" }, // bow, superfiring
     { type: "A", dx: 0, dy: 38, baseRotation: 0,         arc: "back"  }, // stern-most
   ],
-  turretTraverse: Phaser.Math.DegToRad(0.21),
+  turretTraverse: Phaser.Math.DegToRad(23),
   turretReloadSeconds: 7.5,
 
   frontFiringArc: Phaser.Math.DegToRad(265),
