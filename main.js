@@ -419,6 +419,8 @@ function createShip(scene, x, y, typeId, team = TEAMS.PLAYER) {
     maxSpeed: stats.maxSpeed,
     acceleration: stats.acceleration,
     deceleration: stats.deceleration,
+    accelTimeScale: (stats.wakeAccelerationFrames / WAKE_FPS) / (stats.maxSpeed / stats.acceleration),
+    decelTimeScale: (stats.wakeAccelerationFrames / WAKE_FPS) / (stats.maxSpeed / stats.deceleration),
     braking: false,
     turnRate: stats.turnRate,
     speedOrderIndex: DEFAULT_SPEED_ORDER_INDEX,
@@ -1233,11 +1235,11 @@ function computeAvoidanceSteering(ship) {
 }
 
 // ---- Ship-to-ship collision ----
-const COLLISION_RESTITUTION = 0.08; // very small bounce — ships mostly just stop, not rebound
-const COLLISION_SPEED_RETENTION = 0.15; // fraction of speed kept after a hard impact
-const COLLISION_MIN_IMPACT_SPEED = 5; // ignore light grazes, only "real" hits do damage
-const COLLISION_DAMAGE_SCALE = 450; // damage per unit of closing speed at impact
-const COLLISION_DAMAGE_COOLDOWN = 0.75; // seconds before a ship can take collision damage again
+const COLLISION_RESTITUTION = 0.25; 
+const COLLISION_SPEED_RETENTION = 0.15; 
+const COLLISION_MIN_IMPACT_SPEED = 5; 
+const COLLISION_DAMAGE_SCALE = 450; 
+const COLLISION_DAMAGE_COOLDOWN = 0.75;
 
 // Reconstructs a ship's velocity vector from its speed + heading, since
 // ships don't store vx/vy directly — same heading convention used
@@ -1802,7 +1804,6 @@ function computeShipFrame(ship) {
 function restoreShipVisual(ship) {
   const { stats } = ship;
 
-  // Hull is always the static blank.
   ship.sprite.setTexture(stats.textures.hullStationary);
   ship.sprite.setDisplaySize(stats.displayWidth, stats.displayHeight);
 
@@ -1815,6 +1816,11 @@ function restoreShipVisual(ship) {
   ship.wakeSprite.setVisible(true);
   ship.wakeSprite.setTexture(wake.wakeKey, wake.wakeFrame);
   ship.wakeSprite.setDisplaySize(stats.displayWidth, stats.displayHeight);
+  ship.wakeSprite.anims.timeScale = ship.slowingDown
+    ? ship.decelTimeScale
+    : ship.accelerating
+      ? ship.accelTimeScale
+      : 1; // NEW
   ship.wakeSprite.play(wake.wakeAnimKey);
   ship.wakeSprite.setFrame(wake.wakeFrame);
   ship.wakeSprite.anims.setProgress(wake.animProgress);
@@ -1847,10 +1853,10 @@ function updateShip(ship, dt) {
     ship.movementFrameClock = (ship.movementFrameClock + dt) % (stats.wakeMovingFrames / WAKE_FPS);
   }
   if (ship.accelerating) {
-    ship.accelerationFrameClock = (ship.accelerationFrameClock + dt) % (stats.wakeAccelerationFrames / WAKE_FPS);
+    ship.accelerationFrameClock = (ship.accelerationFrameClock + dt * ship.accelTimeScale) % (stats.wakeAccelerationFrames / WAKE_FPS); // scaled
   }
   if (ship.slowingDown) {
-    ship.slowdownFrameClock = (ship.slowdownFrameClock + dt) % (stats.wakeAccelerationFrames / WAKE_FPS);
+    ship.slowdownFrameClock = (ship.slowdownFrameClock + dt * ship.decelTimeScale) % (stats.wakeAccelerationFrames / WAKE_FPS); // scaled
   }
 
    if (ship.target) {
@@ -1910,12 +1916,13 @@ function updateShip(ship, dt) {
           ship.accelerating = true;
           startAccelerationAnimation(ship);
         }
-      } else if (ship.speed > commandedSpeed) {
+       } else if (ship.speed > commandedSpeed) {
         if (!ship.slowingDown) startSlowdownAnimation(ship);
         ship.speed = Math.max(commandedSpeed, ship.speed - ship.deceleration * dt);
         if (ship.speed <= commandedSpeed) {
           ship.slowingDown = false;
           ship.wakeSprite.stop();
+          ship.wakeSprite.anims.timeScale = 1; // NEW
           ship.wakeSprite.play(movingWakeAnimKey(stats));
         }
       } else if (!ship.moving) {
@@ -2030,6 +2037,7 @@ function startSlowdownAnimation(ship) {
   ship.wakeSprite.stop();
   ship.wakeSprite.setTexture(stats.textures.wakeAcceleration, 0);
   ship.wakeSprite.setDisplaySize(stats.displayWidth, stats.displayHeight);
+  ship.wakeSprite.anims.timeScale = ship.decelTimeScale; // NEW
   ship.wakeSprite.play(slowingWakeAnimKey(stats));
 }
 
@@ -2041,14 +2049,13 @@ function startAccelerationAnimation(ship) {
   ship.wakeSprite.stop();
   ship.wakeSprite.setTexture(stats.textures.wakeAcceleration, stats.wakeAccelerationFrames - 1);
   ship.wakeSprite.setDisplaySize(stats.displayWidth, stats.displayHeight);
+  ship.wakeSprite.anims.timeScale = ship.accelTimeScale; // NEW
   ship.wakeSprite.play(acceleratingWakeAnimKey(stats));
 
-  // Hand over to the looping "moving" wake once the build-up finishes.
-  // (This listener used to live on ship.sprite; the hull no longer animates,
-  // so it has to be on the wake sprite or it never fires.)
   ship.wakeSprite.once(`animationcomplete-${acceleratingWakeAnimKey(stats)}`, () => {
     if (!ship.moving || ship.slowingDown) return;
     ship.accelerating = false;
+    ship.wakeSprite.anims.timeScale = 1; // NEW — reset before handing off to the loop
     ship.wakeSprite.setTexture(stats.textures.wakeMoving);
     ship.wakeSprite.setDisplaySize(stats.displayWidth, stats.displayHeight);
     ship.wakeSprite.play(movingWakeAnimKey(stats));
@@ -2079,10 +2086,6 @@ function stopSelectedShips() {
     ship.waypoints = [];
     ship.target = null;
     ship.braking = false;
-    // Deliberately no animation reset here: updateShip() starts the slowdown
-    // wake on its own once the ship has no target, and a slowdown that's
-    // already playing (e.g. braking into the last waypoint) should just keep
-    // playing rather than being cancelled back to the moving wake.
   });
 }
 
