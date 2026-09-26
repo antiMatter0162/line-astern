@@ -146,6 +146,44 @@ function preload() {
   });
 }
 
+let gamePaused = false;
+let pauseOverlayElements = null;
+
+function createPauseOverlay(scene) {
+  const { width, height } = scene.scale;
+
+  const backdrop = scene.add.rectangle(width / 2, height / 2, width, height, 0x000000, 0.65)
+    .setDepth(20).setVisible(false);
+  const title = scene.add.text(width / 2, height / 2 - 60, "PAUSED", {
+    fontSize: "40px", color: "#ffffff",
+  }).setOrigin(0.5).setDepth(21).setVisible(false);
+  const exitButton = scene.add.text(width / 2, height / 2 + 20, "Exit Game", {
+    fontSize: "22px", color: "#ffffff", backgroundColor: "#7a1010", padding: { x: 16, y: 10 },
+  })
+    .setOrigin(0.5).setDepth(21).setVisible(false)
+    .setInteractive({ useHandCursor: true })
+    .on("pointerdown", () => window.electronAPI?.exitGame());
+
+  scene.cameras.main.ignore([backdrop, title, exitButton]);
+  pauseOverlayElements = { scene, backdrop, title, exitButton }; // NEW: keep the scene reference
+}
+
+function togglePause() {
+  gamePaused = !gamePaused;
+  const { scene, backdrop, title, exitButton } = pauseOverlayElements;
+  backdrop.setVisible(gamePaused);
+  title.setVisible(gamePaused);
+  exitButton.setVisible(gamePaused);
+
+  if (gamePaused) {
+    scene.anims.pauseAll(); 
+    scene.time.paused = true; 
+  } else {
+    scene.anims.resumeAll();
+    scene.time.paused = false;
+  }
+}
+
 let cannotAimMessage = null;
 
 function createCannotAimHud(scene) {
@@ -253,6 +291,8 @@ function create() {
   updateSpeedHud();
   createFiringHud(this);
   createCannotAimHud(this);
+  createPauseOverlay(this);
+  this.input.keyboard.on("keydown-ESC", togglePause);
   this.input.keyboard.on("keydown-F", toggleFiringMode);
   this.input.keyboard.on("keydown-X", stopFiring);
   this.input.keyboard.on("keydown-S", stopSelectedShips);
@@ -345,6 +385,7 @@ function create() {
 }
 
 function update(time, delta) {
+  if (gamePaused) return;
   const dt = delta / 1000;
   ships.forEach((ship) => updateShip(ship, dt));
   ships = ships.filter((ship) => !ship.sunk);
@@ -903,12 +944,6 @@ function findHullTextureRowEdges(scene, stats, localY) {
   return left === null ? null : { left, right };
 }
 
-// Cache of precomputed hull row edges, keyed by hull texture key. Each
-// entry is a list of {localY, left, right} at SINK_PIXEL spacing along the
-// hull's length, built once at load (see the buildHullRowProfile call in
-// create()) using the same probe test isHullHitAt relies on at runtime.
-// Sinking/submersion logic looks this up instead of re-scanning the
-// texture live.
 const hullRowProfileCache = {};
 
 function buildHullRowProfile(scene, stats) {
@@ -1428,18 +1463,36 @@ function redrawWaterOverlay(ship) {
     }
     prevDepth = depth;
 
-    const outerX = listSide === 1 ? right : left;   // flooding side's outer hull edge
-    const edgeX = listSide === 1 ? right - depth : left + depth; // creeping waterline
+    const outerX = listSide === 1 ? right : left;
+    const edgeX = listSide === 1 ? right - depth : left + depth;
     rows.push({ localY, edgeX, outerX, rowWidth });
   });
 
-  // Flooded fill, per row, since the real hull width varies row to row
+
   waterOverlay.fillStyle(0x06345a, 1);
-  rows.forEach(({ localY, edgeX, outerX }) => {
-    const x0 = Math.min(edgeX, outerX);
-    const x1 = Math.max(edgeX, outerX);
-    waterOverlay.fillRect(x0, localY - half, x1 - x0, pixel);
+  waterOverlay.beginPath();
+
+  // Down the flood-edge side, top to bottom, in steps matching each row's
+  // exact rect footprint.
+  waterOverlay.moveTo(rows[0].edgeX, rows[0].localY - half);
+  rows.forEach((r, i) => {
+    waterOverlay.lineTo(r.edgeX, r.localY + half);
+    const next = rows[i + 1];
+    if (next) waterOverlay.lineTo(next.edgeX, r.localY + half);
   });
+
+  // Across the bottom, then back up the fixed hull-edge side, bottom to top.
+  const last = rows[rows.length - 1];
+  waterOverlay.lineTo(last.outerX, last.localY + half);
+  for (let i = rows.length - 1; i >= 0; i -= 1) {
+    const r = rows[i];
+    waterOverlay.lineTo(r.outerX, r.localY - half);
+    const prev = rows[i - 1];
+    if (prev) waterOverlay.lineTo(prev.outerX, r.localY - half);
+  }
+
+  waterOverlay.closePath();
+  waterOverlay.fillPath();
 
   // Foam crest along the real waterline
   rows.forEach(({ localY, edgeX, rowWidth }, i) => {

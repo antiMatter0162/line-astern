@@ -1,12 +1,34 @@
 {
-  "name": "warship-rts",
-  "version": "1.0.0",
-  "description": "A small real-time strategy game about commanding warships.",
+  "name": "line-of-battle",
+  "version": "0.1.0",
+  "description": "Line of Battle — naval RTS",
   "main": "electron-main.js",
   "scripts": {
-    "start": "electron ."
+    "start": "electron .",
+    "build": "electron-builder"
   },
   "devDependencies": {
-    "electron": "^44.4.3"
+    "electron": "^32.0.0",
+    "electron-builder": "^25.0.0"
+  },
+  "build": {
+    "appId": "com.yourname.lineofbattle",
+    "productName": "Line of Battle",
+    "files": [
+      "electron-main.js",
+      "index.html",
+      "main.js",
+      "ship-types.js",
+      "assets/**/*"
+    ],
+    "win": {
+      "target": "portable"
+    },
+    "mac": {
+      "target": "dmg"
+    },
+    "linux": {
+      "target": "AppImage"
+    }
   }
 }

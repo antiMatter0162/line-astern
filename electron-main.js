@@ -1,39 +1,55 @@
-const { app, BrowserWindow } = require("electron");
-const path = require("node:path");
+const { app, BrowserWindow, ipcMain } = require("electron"); // add ipcMain
+const path = require("path");
+
+let mainWindow = null;
 
 function createWindow() {
-const window = new BrowserWindow({
-  width: 1024,
-  height: 640,
-  minWidth: 800,
-  minHeight: 500,
-  useContentSize: true,
-  autoHideMenuBar: true,
-  backgroundColor: "#0b1a2b",
-  webPreferences: {
-    contextIsolation: true,
-    nodeIntegration: false,
-  },
-});
+  mainWindow = new BrowserWindow({
+    frame: false,
+    show: false,
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      preload: path.join(__dirname, "preload.js"), // NEW
+    },
+  });
 
-window.setAspectRatio(16 / 10);
+  mainWindow.loadFile(path.join(__dirname, "index.html"));
 
+  mainWindow.once("ready-to-show", () => {
+    mainWindow.show();
+    mainWindow.setFullScreen(true);
+  });
 
-  window.loadFile(path.join(__dirname, "index.html"));
+  mainWindow.webContents.on("before-input-event", (event, input) => {
+    if (input.type === "keyDown" && input.key === "F11") {
+      mainWindow.setFullScreen(!mainWindow.isFullScreen());
+    }
+    // Escape-exits-fullscreen line removed — Escape now belongs entirely
+    // to the game's own pause menu instead.
+  });
+
+  mainWindow.on("closed", () => {
+    mainWindow = null;
+  });
 }
 
-app.whenReady().then(() => {
-  createWindow();
+app.whenReady().then(createWindow);
 
-  app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      createWindow();
-    }
-  });
+// NEW — lets the renderer (your game code) ask the main process to quit,
+// since contextIsolation blocks it from calling app.quit() directly.
+ipcMain.on("exit-game", () => {
+  app.quit();
 });
 
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") {
     app.quit();
+  }
+});
+
+app.on("activate", () => {
+  if (BrowserWindow.getAllWindows().length === 0) {
+    createWindow();
   }
 });
