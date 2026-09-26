@@ -45,7 +45,7 @@ registerShipType({
     { type: "A", dx: 0, dy: 23.5, baseRotation: 0,       arc: "back"  }, // stern, superfiring
     { type: "B", dx: 0, dy: 38, baseRotation: 0,         arc: "back"  }, // stern-most
   ],
-  turretTraverse: Phaser.Math.DegToRad(12),
+  turretTraverse: Phaser.Math.DegToRad(18),
   turretReloadSeconds: 20,
 
   frontFiringArc: Phaser.Math.DegToRad(260),

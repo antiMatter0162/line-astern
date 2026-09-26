@@ -61,6 +61,11 @@ const CAMERA_PAN_SPEED = 450;
 // Turret A/B mounts render at different depths
 const TURRET_DEPTH = { A: 2.6, B: 2.4 };
 
+const TEAMS = {
+  PLAYER: "player",
+  ENEMY: "enemy",
+};
+
 const SINKING_HULL_DEPTH = 1.2;
 const SINKING_TURRET_DEPTH = 1.5;
 const SINKING_WATER_OVERLAY_DEPTH = 1.6;
@@ -227,10 +232,18 @@ function create() {
     });
   });
 
+  // Precompute each ship type's real hull-row edge profile (bow-to-stern
+  // width at every row) once, up front — sinking/submersion checks then
+  // just look this up instead of re-scanning the hull texture live.
+  Object.values(SHIP_TYPES).forEach((stats) => {
+    buildHullRowProfile(this, stats);
+  });
+
   // Create a small starting fleet
   ships = [createShip(this, 6400, 4000, "pennsylvania"),
-          createShip(this, 5400, 4000, "pennsylvania"),
-          createShip(this, 4400, 4000, "new-orleans")];
+          createShip(this, 6400, 4500, "pennsylvania"),
+          createShip(this, 5600, 4000, "new-orleans"),
+          createShip(this, 5200, 4000, "new-orleans", TEAMS.ENEMY)];
 
   // Speed order shortcuts: 1=Ahead 1/3 ... 5=Ahead Flank
   SPEED_ORDERS.forEach((order, index) => {
@@ -274,7 +287,8 @@ function create() {
     let clickedShip = null;
     let clickedDist = Infinity;
     ships.forEach((ship) => {
-      if (ship.sinking) return; // can't select a dying ship
+      if (ship.sinking) return;
+      if (ship.team !== TEAMS.PLAYER) return;
       const dist = Phaser.Math.Distance.Between(pointer.worldX, pointer.worldY, ship.sprite.x, ship.sprite.y);
       if (dist < 20 && dist < clickedDist) {
         clickedShip = ship;
@@ -345,7 +359,7 @@ function update(time, delta) {
 // ---- Ship creation & behavior ----
 
 // typeId is a key into SHIP_TYPES (see ship-types.js), e.g. "pennsylvania".
-function createShip(scene, x, y, typeId) {
+function createShip(scene, x, y, typeId, team = TEAMS.PLAYER) {
   const stats = SHIP_TYPES[typeId];
   if (!stats) {
     throw new Error(`createShip: unknown ship type "${typeId}"`);
@@ -409,7 +423,7 @@ function createShip(scene, x, y, typeId) {
     turnRate: stats.turnRate,
     speedOrderIndex: DEFAULT_SPEED_ORDER_INDEX,
     collisionRadius: stats.collisionRadius,
-    team: "player",
+    team,
     fireTarget: null,
     dispersionEllipse: null,
     dispersionEllipseRangeAtBuild: null,
@@ -849,33 +863,128 @@ function toShipLocal(ship, worldX, worldY) {
   };
 }
 
-function isHullHitAt(ship, worldX, worldY) {
-  const local = toShipLocal(ship, worldX, worldY);
-  const texScaleX = ship.sprite.width / ship.stats.displayWidth;
-  const texScaleY = ship.sprite.height / ship.stats.displayHeight;
-  const texX = Math.round(local.x * texScaleX + ship.sprite.width / 2);
-  const texY = Math.round(local.y * texScaleY + ship.sprite.height / 2);
+function shipLocalToWorld(ship, localX, localY) {
+  const cos = Math.cos(ship.sprite.rotation);
+  const sin = Math.sin(ship.sprite.rotation);
+  return {
+    x: ship.sprite.x + localX * cos - localY * sin,
+    y: ship.sprite.y + localX * sin + localY * cos,
+  };
+}
 
-  if (texX < 0 || texY < 0 || texX >= ship.sprite.width || texY >= ship.sprite.height) return false;
+const HULL_EDGE_SCAN_STEP = 1;
 
-  const alpha = ship.sprite.scene.textures.getPixelAlpha(texX, texY, ship.stats.textures.hullStationary);
+function isHullTextureHitAtLocal(scene, stats, localX, localY) {
+  const texWidth = stats.hullFrameWidth;
+  const texHeight = stats.hullFrameHeight;
+  const texScaleX = texWidth / stats.displayWidth;
+  const texScaleY = texHeight / stats.displayHeight;
+  const texX = Math.round(localX * texScaleX + texWidth / 2);
+  const texY = Math.round(localY * texScaleY + texHeight / 2);
+  if (texX < 0 || texY < 0 || texX >= texWidth || texY >= texHeight) return false;
+  const alpha = scene.textures.getPixelAlpha(texX, texY, stats.textures.hullStationary);
   return alpha !== null && alpha > 0;
+}
+
+// Finds the hull's real left/right extent (ship-local x) at a given
+// ship-local y, for a given ship type's texture.
+function findHullTextureRowEdges(scene, stats, localY) {
+  const halfWidth = stats.displayWidth / 2;
+  let left = null;
+  let right = null;
+  for (let localX = -halfWidth; localX <= halfWidth; localX += HULL_EDGE_SCAN_STEP) {
+    if (isHullTextureHitAtLocal(scene, stats, localX, localY)) {
+      if (left === null) left = localX;
+      right = localX;
+    }
+  }
+  return left === null ? null : { left, right };
+}
+
+// Cache of precomputed hull row edges, keyed by hull texture key. Each
+// entry is a list of {localY, left, right} at SINK_PIXEL spacing along the
+// hull's length, built once at load (see the buildHullRowProfile call in
+// create()) using the same probe test isHullHitAt relies on at runtime.
+// Sinking/submersion logic looks this up instead of re-scanning the
+// texture live.
+const hullRowProfileCache = {};
+
+function buildHullRowProfile(scene, stats) {
+  const texKey = stats.textures.hullStationary;
+  if (hullRowProfileCache[texKey]) return hullRowProfileCache[texKey];
+
+  const halfHeight = stats.displayHeight / 2;
+  const profile = [];
+  for (let localY = -halfHeight; localY <= halfHeight; localY += SINK_PIXEL) {
+    const edges = findHullTextureRowEdges(scene, stats, localY);
+    if (edges) profile.push({ localY, left: edges.left, right: edges.right });
+  }
+
+  hullRowProfileCache[texKey] = profile;
+  return profile;
+}
+
+// Looks up the cached row nearest a given ship-local y. A live sinking
+// ship's exact local.y won't always land precisely on a SINK_PIXEL-spaced
+// sample, so this finds the closest one.
+function getHullRowEdgesNear(ship, localY) {
+  const profile = hullRowProfileCache[ship.stats.textures.hullStationary];
+  if (!profile || profile.length === 0) return null;
+
+  let nearest = profile[0];
+  let nearestDist = Math.abs(nearest.localY - localY);
+  for (let i = 1; i < profile.length; i += 1) {
+    const dist = Math.abs(profile[i].localY - localY);
+    if (dist < nearestDist) { nearest = profile[i]; nearestDist = dist; }
+  }
+  return nearest;
+}
+
+const STERN_SCAN_STEP = 4;
+
+function findHullSternPoint(ship) {
+  const { stats } = ship;
+  const halfHeight = stats.displayHeight / 2;
+  const halfWidth = stats.displayWidth / 2;
+
+  let sternLocalY = null;
+  for (let localY = halfHeight; localY >= -halfHeight; localY -= STERN_SCAN_STEP) {
+    let rowHit = false;
+    for (let localX = -halfWidth; localX <= halfWidth; localX += STERN_SCAN_STEP) {
+      const world = shipLocalToWorld(ship, localX, localY);
+      if (isHullHitAt(ship, world.x, world.y)) { rowHit = true; break; }
+    }
+    if (rowHit) { sternLocalY = localY; break; }
+  }
+  if (sternLocalY === null) return null; // shouldn't happen for a real hull
+
+  let left = null;
+  let right = null;
+  for (let localX = -halfWidth; localX <= halfWidth; localX += STERN_SCAN_STEP) {
+    const world = shipLocalToWorld(ship, localX, sternLocalY);
+    if (isHullHitAt(ship, world.x, world.y)) {
+      if (left === null) left = localX;
+      right = localX;
+    }
+  }
+
+  return { localY: sternLocalY, left: left ?? 0, right: right ?? 0 };
 }
 
 function isPointSubmerged(ship, worldX, worldY) {
   const local = toShipLocal(ship, worldX, worldY);
-  const w = ship.stats.displayWidth * 1.35;
-  const h = ship.stats.displayHeight * 1.15;
-  const halfW = w / 2;
-  const halfH = h / 2;
+  const row = getHullRowEdgesNear(ship, local.y);
+  if (!row) return false; // point isn't over the hull at all
 
-  const normalizedY = Phaser.Math.Clamp(local.y / halfH, -1, 1);
-  const waveAmplitude = w * SINK_JITTER * (1 - ship.sinkProgress * 0.6);
+  const rowWidth = row.right - row.left;
+  const halfHeight = ship.stats.displayHeight / 2;
+  const normalizedY = row.localY / halfHeight;
+  const waveAmplitude = rowWidth * SINK_JITTER * (1 - ship.sinkProgress * 0.6);
   const offset = waterlineOffset(ship.waterlineSeed, normalizedY, ship.sinkElapsed) * waveAmplitude;
-  const depth = Phaser.Math.Clamp(w * ship.sinkProgress + offset, 0, w);
+  const depth = Phaser.Math.Clamp(rowWidth * ship.sinkProgress + offset, 0, rowWidth);
 
-  const submerged = ship.listSide === 1 ? local.x >= halfW - depth : local.x <= -halfW + depth;
-  return submerged;
+  const edgeX = ship.listSide === 1 ? row.right - depth : row.left + depth;
+  return ship.listSide === 1 ? local.x >= edgeX : local.x <= edgeX;
 }
 
 function isHullHitAt(ship, worldX, worldY) {
@@ -1021,8 +1130,13 @@ function spawnWake(ship) {
 
   const cos = Math.cos(ship.sprite.rotation);
   const sin = Math.sin(ship.sprite.rotation);
-  const sternDx = Phaser.Math.FloatBetween(-4, 4) * widthScale;
-  const sternDy = stats.displayHeight * 0.42 + Phaser.Math.FloatBetween(-3, 3);
+
+  const sternPoint = findHullSternPoint(ship);
+  const sternDy = sternPoint ? sternPoint.localY : stats.displayHeight * 0.42;
+  const sternHalfWidth = sternPoint
+    ? (sternPoint.right - sternPoint.left) / 2
+    : 4 * widthScale;
+  const sternDx = Phaser.Math.FloatBetween(-1, 1) * sternHalfWidth;
 
   const worldOffsetX = sternDx * cos - sternDy * sin;
   const worldOffsetY = sternDx * sin + sternDy * cos;
@@ -1270,9 +1384,6 @@ function beginSinking(ship) {
   worldContainer.add(ship.waterOverlay);
 }
 
-// Redraws the water overlay in the ship's own local frame (position +
-// rotation are set on the Graphics object itself, same trick as the
-// dispersion ellipse), so it tracks the hull without per-point transforms.
 function waterlineOffset(seed, normalizedY, time) {
   const swell = Math.sin(normalizedY * 5 + seed.a + time * 0.5) * 0.5;
   const chop = Math.sin(normalizedY * 12 + seed.b - time * 1.1) * 0.3;
@@ -1283,11 +1394,6 @@ function waterlineOffset(seed, normalizedY, time) {
 function redrawWaterOverlay(ship) {
   const { stats, waterOverlay, listSide, waterlineSeed, sinkProgress } = ship;
   const time = ship.sinkElapsed;
-  
-  const w = stats.displayWidth * 1.35;
-  const h = stats.displayHeight * 1.15;
-  const halfW = w / 2;
-  const halfH = h / 2;
   const pixel = SINK_PIXEL;
   const half = pixel / 2;
   const cell = (px, py) => waterOverlay.fillRect(px - half, py - half, pixel, pixel);
@@ -1296,56 +1402,52 @@ function redrawWaterOverlay(ship) {
   waterOverlay.setPosition(Math.round(ship.sprite.x), Math.round(ship.sprite.y));
   waterOverlay.setRotation(ship.sprite.rotation);
 
-  const baseDepth = w * sinkProgress;
-  const waveAmplitude = w * SINK_JITTER * (1 - sinkProgress * 0.6);
   const bodyAlpha = Phaser.Math.Linear(0.65, 1, sinkProgress);
   const foamFade = Phaser.Math.Clamp(1 - sinkProgress / 0.85, 0, 1) * Phaser.Math.Clamp(sinkProgress / 0.25, 0, 1);
+  waterOverlay.setAlpha(bodyAlpha);
 
-  waterOverlay.setAlpha(bodyAlpha); 
+  const profile = hullRowProfileCache[stats.textures.hullStationary];
+  if (!profile || profile.length === 0) return;
 
-  const edgeXs = [];
+  const halfHeight = stats.displayHeight / 2;
+  const maxStepPerRow = pixel * 3;
   let prevDepth = null;
-  const maxStepPerRow = pixel * 3; // limits how sharply the edge can fold row-to-row
+  const rows = [];
 
-  for (let py = -halfH; py <= halfH; py += pixel) {
-    const normalizedY = py / halfH;
+  profile.forEach(({ localY, left, right }) => {
+    const rowWidth = right - left;
+    const normalizedY = localY / halfHeight;
+    const waveAmplitude = rowWidth * SINK_JITTER * (1 - sinkProgress * 0.6);
     const offset = waterlineOffset(waterlineSeed, normalizedY, time) * waveAmplitude;
-    let depth = Math.round(Phaser.Math.Clamp(baseDepth + offset, 0, w) / pixel) * pixel;
+    let depth = Math.round(Phaser.Math.Clamp(rowWidth * sinkProgress + offset, 0, rowWidth) / pixel) * pixel;
 
     if (prevDepth !== null) {
       depth = Phaser.Math.Clamp(depth, prevDepth - maxStepPerRow, prevDepth + maxStepPerRow);
     }
     prevDepth = depth;
 
-    edgeXs.push(listSide === 1 ? halfW - depth : -halfW + depth);
-  }  
+    const outerX = listSide === 1 ? right : left;   // flooding side's outer hull edge
+    const edgeX = listSide === 1 ? right - depth : left + depth; // creeping waterline
+    rows.push({ localY, edgeX, outerX, rowWidth });
+  });
 
-  if (edgeXs.some((x, i) => (listSide === 1 ? x < halfW : x > -halfW))) {
-    const backX = listSide === 1 ? halfW : -halfW;
-    waterOverlay.fillStyle(0x06345a, 1); 
-    waterOverlay.beginPath();
-    waterOverlay.moveTo(backX, -halfH);
-    let prevX = edgeXs[0];
-    edgeXs.forEach((x, i) => {
-      const y = -halfH + i * pixel;
-      waterOverlay.lineTo(prevX, y);
-      waterOverlay.lineTo(x, y);
-      prevX = x;
-    });
-    waterOverlay.lineTo(backX, halfH);
-    waterOverlay.closePath();
-    waterOverlay.fillPath();
-  }
-  
-  edgeXs.forEach((edgeX, i) => {
-    const py = -halfH + i * pixel;
-    const edgeBlend = Math.min(1, i / 20, (edgeXs.length - 1 - i) / 20);
-    const crestDepth = Math.min(6, Math.abs(edgeX - (listSide === 1 ? halfW : -halfW)));
+  // Flooded fill, per row, since the real hull width varies row to row
+  waterOverlay.fillStyle(0x06345a, 1);
+  rows.forEach(({ localY, edgeX, outerX }) => {
+    const x0 = Math.min(edgeX, outerX);
+    const x1 = Math.max(edgeX, outerX);
+    waterOverlay.fillRect(x0, localY - half, x1 - x0, pixel);
+  });
+
+  // Foam crest along the real waterline
+  rows.forEach(({ localY, edgeX, rowWidth }, i) => {
+    const edgeBlend = Math.min(1, i / 20, (rows.length - 1 - i) / 20);
+    const crestDepth = Math.min(6, rowWidth);
     for (let s = 0; s < crestDepth; s += pixel) {
       if (Math.random() > SINK_FOAM_DENSITY * foamFade * edgeBlend) continue;
       const crestX = listSide === 1 ? edgeX + s : edgeX - s;
       waterOverlay.fillStyle(0xdff3ff, Phaser.Math.FloatBetween(0.5, 0.85) * foamFade * edgeBlend);
-      cell(crestX, py);
+      cell(crestX, localY);
     }
   });
 }
