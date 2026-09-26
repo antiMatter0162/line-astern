@@ -30,13 +30,14 @@ registerShipType({
   displayHeight: 130,
   turretDisplaySize: 17,
   
-  maxHealth: 21000,
+  maxHealth: 21500,
   shellAlpha: 900,
 
   maxSpeed: 125,
   acceleration: 85,
   deceleration: 90,
   turnRate: Phaser.Math.DegToRad(35),
+  rudderRampTimeSeconds: 1.5,
   collisionRadius: 28,
 
   turretMounts: [

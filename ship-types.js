@@ -21,6 +21,7 @@ const SHIP_TYPE_DEFAULTS = {
   acceleration: 100,
   deceleration: 100,
   turnRate: Phaser.Math.DegToRad(18),
+  rudderRampTimeSeconds: 2,
   collisionRadius: 26,
 
   turretTraverse: Phaser.Math.DegToRad(20),
