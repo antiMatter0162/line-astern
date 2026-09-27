@@ -12,14 +12,16 @@
 const SHIP_TYPE_DEFAULTS = {
   displayWidth: 56,
   displayHeight: 130,
+  wakeFrameWidth: 240,
+  wakeFrameHeight: 555,
   turretDisplaySize: 21,
 
   maxHealth: 25000,
   shellAlpha: 600,
 
-  maxSpeed: 80,
-  acceleration: 100,
-  deceleration: 100,
+  maxSpeed: 40,
+  acceleration: 50,
+  deceleration: 50,
   turnRate: Phaser.Math.DegToRad(18),
   rudderRampTimeSeconds: 2,
   collisionRadius: 26,

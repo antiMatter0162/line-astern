@@ -23,7 +23,7 @@ registerShipType({
   hullFrameHeight: 2220,
 
   wakeMovingFrames: 7,
-  wakeAccelerationFrames: 9, 
+  wakeAccelerationFrames: 18,
 
 
   displayWidth: 56,
@@ -33,9 +33,9 @@ registerShipType({
   maxHealth: 62000,
   shellAlpha: 2800,
 
-  maxSpeed: 90,
-  acceleration: 108,
-  deceleration: 108,
+  maxSpeed: 45,
+  acceleration: 54,
+  deceleration: 54,
   turnRate: Phaser.Math.DegToRad(20),
   rudderRampTimeSeconds: 3,
   collisionRadius: 28,
