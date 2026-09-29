@@ -3,6 +3,7 @@
 registerShipType({
   id: "pennsylvania",
   label: "Pennsylvania-Class Battleship",
+  shipClass: 0,
 
   textures: {
     hullStationary: "pennsylvania-hull-stationary",
@@ -36,8 +37,8 @@ registerShipType({
   maxSpeed: 45,
   acceleration: 54,
   deceleration: 54,
-  turnRate: Phaser.Math.DegToRad(20),
-  rudderRampTimeSeconds: 3,
+  turnRate: Phaser.Math.DegToRad(10),
+  rudderRampTimeSeconds: 8,
   collisionRadius: 28,
 
   turretMounts: [

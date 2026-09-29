@@ -3,6 +3,7 @@
 registerShipType({
   id: "new-orleans",
   label: "New Orleans-Class Cruiser",
+  shipClass: 1,
 
   textures: {
     hullStationary: "new-orleans-hull-stationary",
@@ -36,8 +37,8 @@ registerShipType({
   maxSpeed: 62.5,
   acceleration: 42.5,
   deceleration: 45,
-  turnRate: Phaser.Math.DegToRad(35),
-  rudderRampTimeSeconds: 1.5,
+  turnRate: Phaser.Math.DegToRad(16),
+  rudderRampTimeSeconds: 5,
   collisionRadius: 28,
 
   turretMounts: [

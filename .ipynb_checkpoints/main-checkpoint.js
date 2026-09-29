@@ -47,7 +47,6 @@ new Phaser.Game(config);
 let ships = [];
 let selectedShips = [];
 let oceanWaves = [];
-let oceanWaveClusters = [];
 let panStart = null;
 let waypointMarkers = [];
 let cameraPanKeys = null;
@@ -146,7 +145,6 @@ function resetSustainedAimForTurn(ship, targetX, targetY) {
 //sinking parameters
 const SINK_DURATION = 30; 
 const SINK_PIXEL = 1;
-const SINK_WATER_OVERLAP = 2;
 const SINK_JITTER = 0.35;
 const SINK_LIST_ANGLE = 0.5; 
 const SINK_FOAM_DENSITY = 0.35;
@@ -347,18 +345,11 @@ function closeShipContextMenu() {
 
 function findShipAt(worldX, worldY) {
   return ships
-    .filter((ship) => !ship.sinking && !ship.sunk && isWithinShipSelectionCircle(ship, worldX, worldY))
+    .filter((ship) => !ship.sinking && !ship.sunk && isHullHitAt(ship, worldX, worldY))
     .sort((a, b) =>
       Phaser.Math.Distance.Between(worldX, worldY, a.sprite.x, a.sprite.y)
       - Phaser.Math.Distance.Between(worldX, worldY, b.sprite.x, b.sprite.y)
     )[0] || null;
-}
-
-function isWithinShipSelectionCircle(ship, worldX, worldY) {
-  const radius = ship.selectedRing.displayWidth / 2;
-  const dx = worldX - ship.sprite.x;
-  const dy = worldY - ship.sprite.y;
-  return dx * dx + dy * dy <= radius * radius;
 }
 
 function create() {
@@ -515,9 +506,9 @@ function create() {
     let clickedShip = null;
     let clickedDist = Infinity;
     ships.forEach((ship) => {
-      if (ship.sinking || ship.sunk) return;
+      if (ship.sinking) return;
       const dist = Phaser.Math.Distance.Between(pointer.worldX, pointer.worldY, ship.sprite.x, ship.sprite.y);
-      if (isWithinShipSelectionCircle(ship, pointer.worldX, pointer.worldY) && dist < clickedDist) {
+      if (dist < 20 && dist < clickedDist) {
         clickedShip = ship;
         clickedDist = dist;
       }
@@ -586,21 +577,15 @@ function createOceanWaves(scene) {
   const columns = Math.floor(MAP_WIDTH / OCEAN_WAVE_SPACING);
   const rows = Math.floor(MAP_HEIGHT / OCEAN_WAVE_SPACING);
   const positions = createOceanWavePositions(columns * rows);
-  const waveDirection = Phaser.Math.FloatBetween(0, Math.PI * 2);
-  oceanWaveClusters = Array.from({ length: Math.ceil(positions.length / 14) }, () => ({
-    x: Math.random() * MAP_WIDTH,
-    y: Math.random() * MAP_HEIGHT,
-  }));
   oceanWaves = [];
 
   positions.forEach(({ x, y }) => {
     const size = Phaser.Math.Between(OCEAN_WAVE_SIZE * 0.8, OCEAN_WAVE_SIZE * 1.2);
-    const maxAlpha = getOceanWaveMaxAlphaAt(x, y);
+    const maxAlpha = Phaser.Math.FloatBetween(0.22, 0.42);
     const lifetime = Phaser.Math.FloatBetween(35, 60);
     const age = Phaser.Math.FloatBetween(OCEAN_WAVE_FADE_DURATION, lifetime - OCEAN_WAVE_FADE_DURATION);
     const sprite = scene.add.sprite(x, y, "ocean-wave")
       .setDisplaySize(size, size)
-      .setRotation(waveDirection + Phaser.Math.FloatBetween(-0.12, 0.12))
       .setTint(randomOceanWaveTint())
       .setAlpha(getOceanWaveAlpha(age, lifetime, maxAlpha))
       .setDepth(OCEAN_WAVE_DEPTH);
@@ -614,7 +599,6 @@ function createOceanWaves(scene) {
       maxAlpha,
     });
   });
-
 }
 
 function createOceanWavePositions(count) {
@@ -623,18 +607,15 @@ function createOceanWavePositions(count) {
   const gridHeight = Math.ceil(MAP_HEIGHT / cellSize);
   const grid = new Int32Array(gridWidth * gridHeight).fill(-1);
   const positions = [];
-  const active = [];
   const minDistanceSquared = OCEAN_WAVE_MIN_DISTANCE * OCEAN_WAVE_MIN_DISTANCE;
-  const addPosition = (x, y) => {
-    const index = positions.length;
-    positions.push({ x, y });
-    grid[Math.floor(y / cellSize) * gridWidth + Math.floor(x / cellSize)] = index;
-    active.push(index);
-  };
-  const hasClearance = (x, y) => {
+
+  while (positions.length < count) {
+    const x = Phaser.Math.Between(0, MAP_WIDTH);
+    const y = Phaser.Math.Between(0, MAP_HEIGHT);
     const cellX = Math.floor(x / cellSize);
     const cellY = Math.floor(y / cellSize);
-    for (let offsetY = -2; offsetY <= 2; offsetY += 1) {
+    let clear = true;
+    for (let offsetY = -2; offsetY <= 2 && clear; offsetY += 1) {
       for (let offsetX = -2; offsetX <= 2; offsetX += 1) {
         const neighborX = cellX + offsetX;
         const neighborY = cellY + offsetY;
@@ -643,59 +624,21 @@ function createOceanWavePositions(count) {
         if (neighborIndex < 0) continue;
         const dx = x - positions[neighborIndex].x;
         const dy = y - positions[neighborIndex].y;
-        if (dx * dx + dy * dy < minDistanceSquared) return false;
+        if (dx * dx + dy * dy < minDistanceSquared) {
+          clear = false;
+          break;
+        }
       }
     }
-    return true;
-  };
 
-  addPosition(Math.random() * MAP_WIDTH, Math.random() * MAP_HEIGHT);
-  while (positions.length < count) {
-    if (active.length === 0) {
-      let addedSeed = false;
-      for (let attempt = 0; attempt < 500 && !addedSeed; attempt += 1) {
-        const x = Math.random() * MAP_WIDTH;
-        const y = Math.random() * MAP_HEIGHT;
-        if (!hasClearance(x, y)) continue;
-        addPosition(x, y);
-        addedSeed = true;
-      }
-      if (!addedSeed) break;
-    }
-
-    const activeSlot = Phaser.Math.Between(0, active.length - 1);
-    const source = positions[active[activeSlot]];
-    let placed = false;
-    for (let attempt = 0; attempt < 30; attempt += 1) {
-      const angle = Phaser.Math.FloatBetween(0, Math.PI * 2);
-      const distance = OCEAN_WAVE_MIN_DISTANCE * Math.sqrt(1 + 3 * Math.random());
-      const x = source.x + Math.cos(angle) * distance;
-      const y = source.y + Math.sin(angle) * distance;
-      if (x < 0 || x >= MAP_WIDTH || y < 0 || y >= MAP_HEIGHT || !hasClearance(x, y)) continue;
-      addPosition(x, y);
-      placed = true;
-      break;
-    }
-
-    if (!placed) {
-      active[activeSlot] = active[active.length - 1];
-      active.pop();
+    if (clear) {
+      const index = positions.length;
+      positions.push({ x, y });
+      grid[cellY * gridWidth + cellX] = index;
     }
   }
 
   return positions;
-}
-
-function getOceanWaveMaxAlphaAt(x, y) {
-  const clusterRadiusSquared = 400 * 400;
-  const belongsToCluster = oceanWaveClusters.some((cluster) => {
-    const dx = x - cluster.x;
-    const dy = y - cluster.y;
-    return dx * dx + dy * dy <= clusterRadiusSquared;
-  });
-  return belongsToCluster
-    ? Phaser.Math.FloatBetween(0.28, 0.46)
-    : Phaser.Math.FloatBetween(0.12, 0.24);
 }
 
 function updateOceanWaves(dt) {
@@ -707,7 +650,7 @@ function updateOceanWaves(dt) {
       sprite.setPosition(spawnPosition.x, spawnPosition.y);
       wave.age = 0;
       wave.lifetime = Phaser.Math.FloatBetween(35, 60);
-      wave.maxAlpha = getOceanWaveMaxAlphaAt(spawnPosition.x, spawnPosition.y);
+      wave.maxAlpha = Phaser.Math.FloatBetween(0.22, 0.42);
       sprite.setTint(randomOceanWaveTint());
     }
     sprite.setAlpha(getOceanWaveAlpha(wave.age, wave.lifetime, wave.maxAlpha));
@@ -721,7 +664,6 @@ function updateOceanWaves(dt) {
     });
     sprite.setVisible(!nearSinkingShip);
   });
-
 }
 
 function findOceanWaveSpawnPosition(excludedWave) {
@@ -1218,7 +1160,7 @@ function issueFireOrder(x, y) {
 
   const targetShip = ships
     .filter((candidate) => candidate.hostile && !candidate.sinking && !candidate.sunk)
-    .filter((candidate) => isWithinShipSelectionCircle(candidate, x, y))
+    .filter((candidate) => isHullHitAt(candidate, x, y))
     .sort((a, b) =>
       Phaser.Math.Distance.Between(x, y, a.sprite.x, a.sprite.y)
       - Phaser.Math.Distance.Between(x, y, b.sprite.x, b.sprite.y)
@@ -1706,8 +1648,7 @@ function isPointSubmerged(ship, worldX, worldY) {
   const offset = waterlineOffset(ship.waterlineSeed, normalizedY, ship.sinkElapsed) * waveAmplitude;
   const depth = Phaser.Math.Clamp(rowWidth * ship.sinkProgress + offset, 0, rowWidth);
 
-  const rawEdgeX = ship.listSide === 1 ? row.right - depth : row.left + depth;
-  const edgeX = rawEdgeX - ship.listSide * SINK_WATER_OVERLAP;
+  const edgeX = ship.listSide === 1 ? row.right - depth : row.left + depth;
   return ship.listSide === 1 ? local.x >= edgeX : local.x <= edgeX;
 }
 
@@ -1876,16 +1817,10 @@ function spawnWake(ship) {
   graphics.setDepth(1.2);
   worldContainer.add(graphics);
 
-  const wakeDriftAngle = ship.sprite.rotation + Math.PI / 2
-    + Phaser.Math.FloatBetween(-0.45, 0.45);
-  const wakeDriftSpeed = Phaser.Math.FloatBetween(1, 2) * widthScale;
-
   activeWakes.push({
     graphics,
     age: 0,
     maxAlpha: Phaser.Math.Linear(0.25, 0.6, speedFraction),
-    driftX: Math.cos(wakeDriftAngle) * wakeDriftSpeed,
-    driftY: Math.sin(wakeDriftAngle) * wakeDriftSpeed,
   });
 }
 
@@ -1918,9 +1853,7 @@ function updateWakes(dt) {
       continue;
     }
 
-    // Drift back and outward from the stern while fading and expanding.
-    wake.graphics.x += wake.driftX * dt;
-    wake.graphics.y += wake.driftY * dt;
+    // Fade out, and drift/expand slightly so it doesn't look static
     wake.graphics.setAlpha(wake.maxAlpha * (1 - t));
     wake.graphics.setScale(1 + t * 0.6);
   }
@@ -2161,8 +2094,7 @@ function redrawWaterOverlay(ship) {
     prevDepth = depth;
 
     const outerX = listSide === 1 ? right : left;
-    const rawEdgeX = listSide === 1 ? right - depth : left + depth;
-    const edgeX = rawEdgeX - listSide * SINK_WATER_OVERLAP;
+    const edgeX = listSide === 1 ? right - depth : left + depth;
     rows.push({ localY, edgeX, outerX, rowWidth });
   });
 
@@ -2179,8 +2111,8 @@ function redrawWaterOverlay(ship) {
     let runEnd = null;
     const drawRun = () => {
       if (runStart === null) return;
-      const runLeft = runStart - half - (listSide === -1 ? SINK_WATER_OVERLAP : 0);
-      const runRight = runEnd + half + (listSide === 1 ? SINK_WATER_OVERLAP : 0);
+      const runLeft = runStart - half;
+      const runRight = runEnd + half;
       const runTop = localY - half;
       const runBottom = localY + half;
       waterOverlay.moveTo(runLeft, runTop);
