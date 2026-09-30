@@ -18,6 +18,8 @@
       "electron-main.js",
       "index.html",
       "enemy-ai.js",
+      "pixel-font.js",
+      "start-screen.js",
       "main.js",
       "ship-types.js",
       "assets/**/*"

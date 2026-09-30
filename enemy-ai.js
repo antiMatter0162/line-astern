@@ -23,8 +23,8 @@ window.createEnemyAI = function createEnemyAI(deps) {
   const TARGET_SWITCH_RANGE_FACTOR = 0.85;
   const BATTLESHIP_CLASS = 0;
   const CRUISER_CLASSES = new Set([1, 2]);
-  const BATTLESHIP_AVOIDANCE_TRIGGER = 2400;
-  const BATTLESHIP_AVOIDANCE_GOAL = 2600;
+  const BATTLESHIP_AVOIDANCE_TRIGGER = 2150;
+  const BATTLESHIP_AVOIDANCE_GOAL = 2250;
   const shipStates = new WeakMap();
   let decisionClock = 0;
 
@@ -86,25 +86,28 @@ window.createEnemyAI = function createEnemyAI(deps) {
       const state = getShipState(enemy);
       if (shouldAvoidBattleship) {
         const retreatDestination = getBattleshipRetreatDestination(enemy, battleships);
-        if (nearestPlayer) {
-          setShipSpeedOrder(enemy, speedOrders.length - 1);
-        } else {
-          const distanceToSafetyPosition = Phaser.Math.Distance.Between(
-            enemy.sprite.x, enemy.sprite.y, retreatDestination.x, retreatDestination.y,
-          );
-          setAiSpeed(enemy, nearestBattleship.ship, distanceToSafetyPosition);
-        }
+        const distanceToSafetyPosition = Phaser.Math.Distance.Between(
+          enemy.sprite.x, enemy.sprite.y, retreatDestination.x, retreatDestination.y,
+        );
+        setAiSpeed(enemy, nearestBattleship.ship, distanceToSafetyPosition);
         setAiDestination(scene, enemy, retreatDestination, true);
-        if (nearestPlayer) {
-          const targetDistance = Phaser.Math.Distance.Between(
-            enemy.sprite.x, enemy.sprite.y,
-            nearestPlayer.target.sprite.x, nearestPlayer.target.sprite.y,
-          );
-          if (state.targetShip !== nearestPlayer.target) {
-            state.targetShip = nearestPlayer.target;
-            state.formationSide = chooseFormationSide(enemy, nearestPlayer.target);
+        const preferredTarget = nearestPlayer?.target;
+        const preferredDistance = nearestPlayer?.distance ?? Infinity;
+        const battleshipDistance = nearestBattleship.distance;
+        const preferredCanFire = preferredTarget
+          && isWithinFiringRange(enemy, preferredDistance);
+        const battleshipCanFire = isWithinFiringRange(enemy, battleshipDistance);
+        const firingTarget = preferredCanFire
+          ? preferredTarget
+          : battleshipCanFire ? nearestBattleship.ship : null;
+        const firingDistance = preferredCanFire ? preferredDistance : battleshipDistance;
+        if (firingTarget) {
+          state.targetShip = firingTarget;
+          if (firingTarget === preferredTarget
+            && state.formationSide == null) {
+            state.formationSide = chooseFormationSide(enemy, firingTarget);
           }
-          updateFireOrder(enemy, nearestPlayer.target, targetDistance);
+          updateFireOrder(enemy, firingTarget, firingDistance);
         } else {
           state.targetShip = null;
           state.formationSide = null;
@@ -262,9 +265,7 @@ window.createEnemyAI = function createEnemyAI(deps) {
   }
 
   function updateFireOrder(ship, target, distance) {
-    const inRange = distance >= ship.stats.minFiringDistance
-      && distance <= ship.stats.maxFiringDistance;
-    if (!inRange) {
+    if (!isWithinFiringRange(ship, distance)) {
       clearEnemyAiTarget(ship);
       return;
     }
@@ -276,6 +277,11 @@ window.createEnemyAI = function createEnemyAI(deps) {
       ship.dispersionEllipse.destroy();
       ship.dispersionEllipse = null;
     }
+  }
+
+  function isWithinFiringRange(ship, distance) {
+    return distance >= ship.stats.minFiringDistance
+      && distance <= ship.stats.maxFiringDistance;
   }
 
   function clearEnemyAiTarget(ship) {

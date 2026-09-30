@@ -47,7 +47,9 @@ new Phaser.Game(config);
 let ships = [];
 let selectedShips = [];
 let oceanWaves = [];
-let oceanWaveClusters = [];
+let oceanWaveChunks = new Map();
+let oceanWaveChunkWindow = "";
+let oceanWaveDirection = 0;
 let panStart = null;
 let waypointMarkers = [];
 let cameraPanKeys = null;
@@ -60,13 +62,14 @@ let tacticalGrid = null;
 let tacticalFrame = null;
 let oceanBackground = null;
 const tacticalHiddenEffects = new Set();
+const attachedHitExplosions = new Set();
 const TACTICAL_SYMBOL_WIDTH = 55;
 const TACTICAL_SYMBOL_HEIGHT = 82.5;
 // Measured alpha bounds: ship symbol hulls are 240x720 in 480x720 images;
 // the outline mask is 270x750 in a 480x750 image.
 const TACTICAL_OUTLINE_WIDTH = (TACTICAL_SYMBOL_WIDTH * (240 / 480) + 2) * (480 / 270);
 const TACTICAL_OUTLINE_HEIGHT = TACTICAL_SYMBOL_HEIGHT + 2;
-const TACTICAL_MIN_ZOOM = 0.1;
+const TACTICAL_MIN_ZOOM = 0.049;
 const TACTICAL_MAX_ZOOM = 0.5;
 const TACTICAL_SYMBOL_TEXTURES = ["tactical-bb", "tactical-ca", "tactical-cl", "tactical-dd"];
 const waypointSize = 48;
@@ -77,12 +80,14 @@ const turnWindowLeeway = 3;
 const WAKE_FPS = 12;
 const CAMERA_PAN_SPEED = 450;
 const CAMERA_FOCUS_RESPONSE = 14;
-const MAP_WIDTH = 12800;
-const MAP_HEIGHT = 8000;
+const MAP_WIDTH = 25600;
+const MAP_HEIGHT = 16000;
 const OCEAN_WAVE_FRAME_SIZE = 480;
 const OCEAN_WAVE_SPACING = 260;
 const OCEAN_WAVE_SIZE = 45;
 const OCEAN_WAVE_MIN_DISTANCE = 160;
+const OCEAN_WAVE_CHUNK_SIZE = 2048;
+const OCEAN_WAVE_CHUNK_BUFFER = 1;
 const OCEAN_WAVE_CLEARANCE = 100;
 const OCEAN_WAVE_DEPTH = 0.5;
 const OCEAN_WAVE_FADE_DURATION = 0.8;
@@ -109,6 +114,7 @@ const ORDER_MARKER_DEPTH = 1.8;
 // ---- Firing mode ----
 let firingModeActive = false;
 let firingModeIndicator = null;
+let firingModeIndicatorBackground = null;
 const FIRE_TARGET_TOGGLE_RADIUS = 24; // right-clicking within this many world units of the current target cancels it
 let shipContextMenu = null;
 let contextMenuConsumedPointer = false;
@@ -202,9 +208,11 @@ const enemyAI = window.createEnemyAI({
   refreshShipDispersionEllipse,
 });
 let speedHudButtons = null;
+let speedHudLabels = null;
 let speedHudBackdrop = null;
 let speedHudTitle = null;
 let speedHudTitleText = null;
+let speedHudExpanded = false;
 
 function preload() {
   this.load.image("selection-circle", "assets/Selection-Circle.png");
@@ -256,38 +264,55 @@ function preload() {
   });
 }
 
-let gamePaused = false;
+let gamePaused = true;
 let suppressGameplayPointer = false;
 let pauseOverlayElements = null;
+let startScreenActive = true;
+let startScreenMenu = null;
+
+function startGame() {
+  if (!startScreenActive) return;
+  suppressGameplayPointer = true;
+  startScreenActive = false;
+  startScreenMenu.hide();
+  setPaused(false);
+}
 
 function createPauseOverlay(scene) {
-  const { width, height } = scene.scale;
+  const centerX = config.width / 2;
+  const centerY = config.height / 2;
+  const backdrop = scene.add.rectangle(centerX, centerY, config.width, config.height, 0x000000, 0.72)
+    .setDepth(20).setVisible(false).setInteractive();
+  const title = PixelFont.create(scene, "PAUSED", {
+    x: centerX, y: centerY - 112, pixelSize: 5, color: 0xffffff, depth: 21, align: "center",
+  }).setVisible(false);
 
-  const backdrop = scene.add.rectangle(width / 2, height / 2, width, height, 0x000000, 0.65)
-    .setDepth(20).setVisible(false)
-    .setInteractive();
-  const title = scene.add.text(width / 2, height / 2 - 60, "PAUSED", {
-    fontSize: "40px", color: "#ffffff",
-  }).setOrigin(0.5).setDepth(21).setVisible(false);
-  const resumeButton = scene.add.text(width / 2, height / 2 + 20, "Resume Game", {
-    fontSize: "22px", color: "#ffffff", backgroundColor: "#245c32", padding: { x: 16, y: 10 },
-  })
-    .setOrigin(0.5).setDepth(21).setVisible(false)
-    .setInteractive({ useHandCursor: true })
-    .on("pointerdown", () => {
-      suppressGameplayPointer = true;
-      setPaused(false);
-    });
-  const exitButton = scene.add.text(width / 2, height / 2 + 20, "Exit Game", {
-    fontSize: "22px", color: "#ffffff", backgroundColor: "#7a1010", padding: { x: 16, y: 10 },
-  })
-    .setPosition(width / 2, height / 2 + 82)
-    .setOrigin(0.5).setDepth(21).setVisible(false)
-    .setInteractive({ useHandCursor: true })
-    .on("pointerdown", () => window.electronAPI?.exitGame());
+  const makeButton = (y, label, fill, onClick) => {
+    const button = scene.add.rectangle(centerX, y + 22, 270, 48, fill)
+      .setDepth(21).setVisible(false)
+      .setInteractive({ useHandCursor: true })
+      .on("pointerdown", onClick);
+    const text = PixelFont.create(scene, label, {
+      x: centerX, y: y + 14, pixelSize: 3, color: 0xffffff, depth: 22, align: "center",
+    }).setVisible(false);
+    return { button, text };
+  };
 
-  scene.cameras.main.ignore([backdrop, title, resumeButton, exitButton]);
-  pauseOverlayElements = { scene, backdrop, title, resumeButton, exitButton };
+  const resume = makeButton(centerY - 52, "RESUME GAME", 0x245c32, () => {
+    suppressGameplayPointer = true;
+    setPaused(false);
+  });
+  const mainMenu = makeButton(centerY + 8, "MAIN MENU", 0x12584f, () => {
+    suppressGameplayPointer = true;
+    startScreenActive = true;
+    startScreenMenu.show();
+  });
+  const exit = makeButton(centerY + 68, "EXIT GAME", 0x7a1010, () => window.electronAPI?.exitGame());
+  const elements = [backdrop, title, resume.button, resume.text,
+    mainMenu.button, mainMenu.text, exit.button, exit.text];
+
+  scene.cameras.main.ignore(elements);
+  pauseOverlayElements = { scene, elements };
 }
 
 function togglePause() {
@@ -296,56 +321,62 @@ function togglePause() {
 
 function setPaused(paused) {
   gamePaused = paused;
-  const { scene, backdrop, title, resumeButton, exitButton } = pauseOverlayElements;
-  backdrop.setVisible(gamePaused);
-  title.setVisible(gamePaused);
-  resumeButton.setVisible(gamePaused);
-  exitButton.setVisible(gamePaused);
+  pauseOverlayElements.elements.forEach((element) => element.setVisible(gamePaused));
 
   if (gamePaused) {
     panStart = null;
     closeShipContextMenu();
-    scene.anims.pauseAll(); 
-    scene.time.paused = true; 
+    pauseOverlayElements.scene.anims.pauseAll();
+    pauseOverlayElements.scene.time.paused = true;
   } else {
-    scene.anims.resumeAll();
-    scene.time.paused = false;
+    pauseOverlayElements.scene.anims.resumeAll();
+    pauseOverlayElements.scene.time.paused = false;
   }
   updateSpeedOrderCooldownVisuals();
 }
 
 let cannotAimMessage = null;
+let cannotAimBackground = null;
 
 function createCannotAimHud(scene) {
-  cannotAimMessage = scene.add.text(
-    config.width / 2, 60, "Cannot aim there!",
-    { fontSize: "20px", color: "#ffffff", backgroundColor: "#7a1010", padding: { x: 14, y: 8 } },
-  ).setOrigin(0.5, 0).setDepth(10).setVisible(false);
-  scene.cameras.main.ignore(cannotAimMessage);
+  cannotAimBackground = scene.add.rectangle(config.width / 2, 82, 270, 38, 0x7a1010)
+    .setDepth(9).setVisible(false);
+  cannotAimMessage = PixelFont.create(scene, "CANNOT AIM THERE!", {
+    x: config.width / 2, y: 73, pixelSize: 2, color: 0xffffff, depth: 10, align: "center",
+  }).setVisible(false);
+  scene.cameras.main.ignore([cannotAimBackground, cannotAimMessage]);
 }
 
 function flashCannotAimMessage(scene) {
   if (!cannotAimMessage) return;
+  cannotAimBackground.setVisible(true);
   cannotAimMessage.setVisible(true);
-  scene.time.delayedCall(900, () => cannotAimMessage.setVisible(false));
+  scene.time.delayedCall(900, () => {
+    cannotAimBackground.setVisible(false);
+    cannotAimMessage.setVisible(false);
+  });
 }
 
 function createShipContextMenu(scene) {
-  const menuScale = 2 / 3;
-  const menuPadding = 8;
-  const panel = scene.add.rectangle(0, 0, 1, 1, 0x102a3a, 0.98)
-    .setOrigin(0).setScale(menuScale).setDepth(30).setVisible(false).setInteractive()
+  const padding = 8;
+  const pixelSize = 1.25;
+  const defaultLabel = "IDENTIFY AS HOSTILE";
+  const maxLabel = "REMOVE HOSTILE MARKING";
+  const labelWidth = Math.max(
+    PixelFont.measureLine(defaultLabel, pixelSize),
+    PixelFont.measureLine(maxLabel, pixelSize),
+  );
+  const labelHeight = 7 * pixelSize;
+  const optionWidth = labelWidth + padding * 2;
+  const optionHeight = labelHeight + padding * 2;
+  const panel = scene.add.rectangle(0, 0, optionWidth + padding * 2, optionHeight + padding * 2, 0x102a3a, 0.98)
+    .setOrigin(0).setDepth(30).setVisible(false).setInteractive()
     .on("pointerdown", () => {
       contextMenuConsumedPointer = true;
       closeShipContextMenu();
     });
-  const option = scene.add.text(8, 8, "Identify as hostile", {
-    fontSize: "16px",
-    color: "#ffffff",
-    backgroundColor: "#7a1010",
-    padding: { x: 8, y: 5 },
-  })
-    .setScale(menuScale).setDepth(31).setVisible(false)
+  const option = scene.add.rectangle(padding, padding, optionWidth, optionHeight, 0x7a1010)
+    .setOrigin(0).setDepth(31).setVisible(false)
     .setInteractive({ useHandCursor: true })
     .on("pointerdown", () => {
       contextMenuConsumedPointer = true;
@@ -357,29 +388,31 @@ function createShipContextMenu(scene) {
       }
       closeShipContextMenu();
     });
-  scene.cameras.main.ignore([panel, option]);
-  shipContextMenu = { scene, panel, option, ship: null, menuScale, menuPadding };
+  const optionLabel = PixelFont.create(scene, defaultLabel, {
+    x: padding + 6, y: padding + 5, pixelSize, color: 0xffffff, depth: 32,
+  }).setVisible(false);
+  scene.cameras.main.ignore([panel, option, optionLabel]);
+  shipContextMenu = { scene, panel, option, optionLabel, ship: null, padding };
 }
 
 function openShipContextMenu(ship, screenX, screenY) {
   if (!shipContextMenu) return;
-  const { panel, option, menuScale, menuPadding } = shipContextMenu;
-  option.setText(ship.hostile ? "Remove hostile marking" : "Identify as hostile");
-  panel.setSize(option.width + menuPadding * 2, option.height + menuPadding * 2);
-  const menuWidth = panel.width * menuScale;
-  const menuHeight = panel.height * menuScale;
+  const { panel, option, optionLabel, padding } = shipContextMenu;
+  optionLabel.setPixelText(ship.hostile ? "REMOVE HOSTILE MARKING" : "IDENTIFY AS HOSTILE");
   const clickOffset = 8;
-  const x = Phaser.Math.Clamp(screenX + clickOffset, 0, config.width - menuWidth);
-  const y = Phaser.Math.Clamp(screenY + clickOffset, 0, config.height - menuHeight);
+  const x = Phaser.Math.Clamp(screenX + clickOffset, 0, config.width - panel.displayWidth);
+  const y = Phaser.Math.Clamp(screenY + clickOffset, 0, config.height - panel.displayHeight);
   shipContextMenu.ship = ship;
   panel.setPosition(x, y).setVisible(true);
-  option.setPosition(x + menuPadding * menuScale, y + menuPadding * menuScale).setVisible(true);
+  option.setPosition(x + padding, y + padding).setVisible(true);
+  optionLabel.setPixelPosition(x + padding + 6, y + padding + 5).setVisible(true);
 }
 
 function closeShipContextMenu() {
   if (!shipContextMenu) return;
   shipContextMenu.panel.setVisible(false);
   shipContextMenu.option.setVisible(false);
+  shipContextMenu.optionLabel.setVisible(false);
   shipContextMenu.ship = null;
 }
 
@@ -404,12 +437,12 @@ function create() {
   initializeShellSpritePool(this);
 
   // Uniform deep-blue ocean background
-  oceanBackground = this.add.rectangle(6400, 4000, 12800, 8000, 0x06345a);
+  oceanBackground = this.add.rectangle(MAP_WIDTH / 2, MAP_HEIGHT / 2, MAP_WIDTH, MAP_HEIGHT, 0x06345a);
   worldContainer.add(oceanBackground);
 
   const camera = this.cameras.main;
   camera.setBounds(0, 0, MAP_WIDTH, MAP_HEIGHT);
-  camera.centerOn(6400, 4000);
+  camera.centerOn(MAP_WIDTH / 2, MAP_HEIGHT / 2);
 
   cameraPanKeys = setupCameraPanKeys(this);
   cameraZoomKeys = setupCameraZoomKeys(this);
@@ -498,9 +531,9 @@ function create() {
   });
 
   // Create a small starting fleet
-  ships = [createShip(this, 6400, 4000, "pennsylvania", TEAMS.PLAYER, Math.PI / 2),
-          createShip(this, 5600, 4000, "new-orleans", TEAMS.PLAYER, Math.PI / 2),
-          createShip(this, 1000, 5000, "new-orleans", TEAMS.ENEMY, Math.PI / 4 * 3)];
+  ships = [createShip(this, MAP_WIDTH / 2, MAP_HEIGHT / 2, "pennsylvania", TEAMS.PLAYER, Math.PI / 2),
+          createShip(this, MAP_WIDTH / 2 - 800, MAP_HEIGHT / 2, "new-orleans", TEAMS.PLAYER, Math.PI / 2),
+          createShip(this, MAP_WIDTH / 2 - 5400, MAP_HEIGHT / 2 + 1000, "new-orleans", TEAMS.ENEMY, Math.PI / 4 * 3)];
 
   this.anims.create({
     key: "ocean-wave",
@@ -527,7 +560,17 @@ function create() {
   createFiringHud(this);
   createCannotAimHud(this);
   createPauseOverlay(this);
-  this.input.keyboard.on("keydown-ESC", togglePause);
+  startScreenMenu = window.createStartScreen(
+    this,
+    startGame,
+    () => window.electronAPI?.exitGame(),
+  );
+  this.anims.pauseAll();
+  this.time.paused = true;
+  this.input.keyboard.on("keydown-ESC", () => {
+    if (startScreenActive) return;
+    togglePause();
+  });
   this.input.keyboard.on("keydown-TAB", (event) => {
     event.preventDefault();
     if (gamePaused || event.repeat) return;
@@ -543,13 +586,13 @@ function create() {
   this.input.keyboard.on("keydown-S", () => { if (!gamePaused) stopSelectedShips(); });
   //this.input.keyboard.on("keydown-PERIOD", killSelectedShips); // debug: force-sink selected ships
   this.input.keyboard.on("keydown", (event) => {
-    if (event.code !== "AltLeft" || firingArcDebugActive) return;
+    if (gamePaused || event.code !== "AltLeft" || firingArcDebugActive) return;
     event.preventDefault();
     firingArcDebugActive = true;
     drawFiringArcDebug(this);
   });
   this.input.keyboard.on("keyup", (event) => {
-    if (event.code !== "AltLeft" || !firingArcDebugActive) return;
+    if (gamePaused || event.code !== "AltLeft" || !firingArcDebugActive) return;
     event.preventDefault();
     firingArcDebugActive = false;
     clearFiringArcDebug();
@@ -680,112 +723,125 @@ function create() {
 }
 
 function createOceanWaves(scene) {
-  const columns = Math.floor(MAP_WIDTH / OCEAN_WAVE_SPACING);
-  const rows = Math.floor(MAP_HEIGHT / OCEAN_WAVE_SPACING);
-  const positions = createOceanWavePositions(columns * rows);
-  const waveDirection = Phaser.Math.FloatBetween(0, Math.PI * 2);
-  oceanWaveClusters = Array.from({ length: Math.ceil(positions.length / 14) }, () => ({
-    x: Math.random() * MAP_WIDTH,
-    y: Math.random() * MAP_HEIGHT,
-  }));
   oceanWaves = [];
+  oceanWaveChunks = new Map();
+  oceanWaveChunkWindow = "";
+  oceanWaveDirection = Phaser.Math.FloatBetween(0, Math.PI * 2);
+  streamOceanWaves(scene.cameras.main, scene);
+}
 
-  positions.forEach(({ x, y }) => {
+function isWithinOceanEffectRange(x, y, camera, margin = OCEAN_WAVE_CHUNK_SIZE) {
+  const left = camera.scrollX - margin;
+  const top = camera.scrollY - margin;
+  const right = camera.scrollX + camera.width / camera.zoom + margin;
+  const bottom = camera.scrollY + camera.height / camera.zoom + margin;
+  return x >= left && x <= right && y >= top && y <= bottom;
+}
+
+function streamOceanWaves(camera, scene) {
+  if (tacticalDisplayActive) return;
+  const left = Math.max(0, camera.scrollX - OCEAN_WAVE_CHUNK_SIZE * OCEAN_WAVE_CHUNK_BUFFER);
+  const top = Math.max(0, camera.scrollY - OCEAN_WAVE_CHUNK_SIZE * OCEAN_WAVE_CHUNK_BUFFER);
+  const right = Math.min(
+    MAP_WIDTH - 1,
+    camera.scrollX + camera.width / camera.zoom + OCEAN_WAVE_CHUNK_SIZE * OCEAN_WAVE_CHUNK_BUFFER,
+  );
+  const bottom = Math.min(
+    MAP_HEIGHT - 1,
+    camera.scrollY + camera.height / camera.zoom + OCEAN_WAVE_CHUNK_SIZE * OCEAN_WAVE_CHUNK_BUFFER,
+  );
+  const minChunkX = Math.max(0, Math.floor(left / OCEAN_WAVE_CHUNK_SIZE));
+  const minChunkY = Math.max(0, Math.floor(top / OCEAN_WAVE_CHUNK_SIZE));
+  const maxChunkX = Math.floor(right / OCEAN_WAVE_CHUNK_SIZE);
+  const maxChunkY = Math.floor(bottom / OCEAN_WAVE_CHUNK_SIZE);
+  const desiredKeys = [];
+  for (let chunkY = minChunkY; chunkY <= maxChunkY; chunkY += 1) {
+    for (let chunkX = minChunkX; chunkX <= maxChunkX; chunkX += 1) {
+      desiredKeys.push(`${chunkX},${chunkY}`);
+    }
+  }
+  const windowKey = desiredKeys.join("|");
+  if (windowKey === oceanWaveChunkWindow) return;
+
+  // Create incoming chunks before removing old ones so nearby chunks can
+  // preserve the minimum spacing at their shared borders.
+  desiredKeys.forEach((key) => {
+    if (!oceanWaveChunks.has(key)) {
+      const [chunkX, chunkY] = key.split(",").map(Number);
+      oceanWaveChunks.set(key, createOceanWaveChunk(scene, chunkX, chunkY));
+    }
+  });
+  oceanWaveChunks.forEach((chunk, key) => {
+    if (desiredKeys.includes(key)) return;
+    chunk.waves.forEach((wave) => wave.sprite.destroy());
+    oceanWaveChunks.delete(key);
+  });
+  oceanWaves = [];
+  oceanWaveChunks.forEach((chunk) => oceanWaves.push(...chunk.waves));
+  oceanWaveChunkWindow = windowKey;
+}
+
+function createOceanWaveChunk(scene, chunkX, chunkY) {
+  const x = chunkX * OCEAN_WAVE_CHUNK_SIZE;
+  const y = chunkY * OCEAN_WAVE_CHUNK_SIZE;
+  const width = Math.min(OCEAN_WAVE_CHUNK_SIZE, MAP_WIDTH - x);
+  const height = Math.min(OCEAN_WAVE_CHUNK_SIZE, MAP_HEIGHT - y);
+  const targetCount = Math.max(1, Math.round(width * height / (OCEAN_WAVE_SPACING ** 2)));
+  const clusters = Array.from({ length: Math.ceil(targetCount / 14) }, () => ({
+    x: x + Math.random() * width,
+    y: y + Math.random() * height,
+  }));
+  const positions = [];
+  const minDistanceSquared = OCEAN_WAVE_MIN_DISTANCE * OCEAN_WAVE_MIN_DISTANCE;
+  const hasClearance = (x, y) => {
+    for (const position of positions) {
+      const dx = x - position.x;
+      const dy = y - position.y;
+      if (dx * dx + dy * dy < minDistanceSquared) return false;
+    }
+    for (const wave of oceanWaves) {
+      const dx = x - wave.sprite.x;
+      const dy = y - wave.sprite.y;
+      if (dx * dx + dy * dy < minDistanceSquared) return false;
+    }
+    return true;
+  };
+
+  let attempts = 0;
+  const maxAttempts = targetCount * 40;
+  while (positions.length < targetCount && attempts < maxAttempts) {
+    attempts += 1;
+    const candidate = {
+      x: x + Math.random() * width,
+      y: y + Math.random() * height,
+    };
+    if (hasClearance(candidate.x, candidate.y)) positions.push(candidate);
+  }
+
+  const chunk = { x, y, width, height, clusters, waves: [] };
+  positions.forEach((position) => {
     const size = Phaser.Math.Between(OCEAN_WAVE_SIZE * 0.8, OCEAN_WAVE_SIZE * 1.2);
-    const maxAlpha = getOceanWaveMaxAlphaAt(x, y);
+    const maxAlpha = getOceanWaveMaxAlphaAt(position.x, position.y, clusters);
     const lifetime = Phaser.Math.FloatBetween(35, 60);
     const age = Phaser.Math.FloatBetween(OCEAN_WAVE_FADE_DURATION, lifetime - OCEAN_WAVE_FADE_DURATION);
-    const sprite = scene.add.sprite(x, y, "ocean-wave")
+    const sprite = scene.add.sprite(position.x, position.y, "ocean-wave")
       .setDisplaySize(size, size)
-      .setRotation(waveDirection + Phaser.Math.FloatBetween(-0.12, 0.12))
+      .setRotation(oceanWaveDirection + Phaser.Math.FloatBetween(-0.12, 0.12))
       .setTint(randomOceanWaveTint())
       .setAlpha(getOceanWaveAlpha(age, lifetime, maxAlpha))
       .setDepth(OCEAN_WAVE_DEPTH);
     sprite.play("ocean-wave", true, Phaser.Math.Between(0, 5));
     worldContainer.add(sprite);
-
-    oceanWaves.push({
-      sprite,
-      age,
-      lifetime,
-      maxAlpha,
-    });
+    const wave = { sprite, age, lifetime, maxAlpha, chunk };
+    chunk.waves.push(wave);
+    oceanWaves.push(wave);
   });
-
+  return chunk;
 }
 
-function createOceanWavePositions(count) {
-  const cellSize = OCEAN_WAVE_MIN_DISTANCE / Math.SQRT2;
-  const gridWidth = Math.ceil(MAP_WIDTH / cellSize);
-  const gridHeight = Math.ceil(MAP_HEIGHT / cellSize);
-  const grid = new Int32Array(gridWidth * gridHeight).fill(-1);
-  const positions = [];
-  const active = [];
-  const minDistanceSquared = OCEAN_WAVE_MIN_DISTANCE * OCEAN_WAVE_MIN_DISTANCE;
-  const addPosition = (x, y) => {
-    const index = positions.length;
-    positions.push({ x, y });
-    grid[Math.floor(y / cellSize) * gridWidth + Math.floor(x / cellSize)] = index;
-    active.push(index);
-  };
-  const hasClearance = (x, y) => {
-    const cellX = Math.floor(x / cellSize);
-    const cellY = Math.floor(y / cellSize);
-    for (let offsetY = -2; offsetY <= 2; offsetY += 1) {
-      for (let offsetX = -2; offsetX <= 2; offsetX += 1) {
-        const neighborX = cellX + offsetX;
-        const neighborY = cellY + offsetY;
-        if (neighborX < 0 || neighborX >= gridWidth || neighborY < 0 || neighborY >= gridHeight) continue;
-        const neighborIndex = grid[neighborY * gridWidth + neighborX];
-        if (neighborIndex < 0) continue;
-        const dx = x - positions[neighborIndex].x;
-        const dy = y - positions[neighborIndex].y;
-        if (dx * dx + dy * dy < minDistanceSquared) return false;
-      }
-    }
-    return true;
-  };
-
-  addPosition(Math.random() * MAP_WIDTH, Math.random() * MAP_HEIGHT);
-  while (positions.length < count) {
-    if (active.length === 0) {
-      let addedSeed = false;
-      for (let attempt = 0; attempt < 500 && !addedSeed; attempt += 1) {
-        const x = Math.random() * MAP_WIDTH;
-        const y = Math.random() * MAP_HEIGHT;
-        if (!hasClearance(x, y)) continue;
-        addPosition(x, y);
-        addedSeed = true;
-      }
-      if (!addedSeed) break;
-    }
-
-    const activeSlot = Phaser.Math.Between(0, active.length - 1);
-    const source = positions[active[activeSlot]];
-    let placed = false;
-    for (let attempt = 0; attempt < 30; attempt += 1) {
-      const angle = Phaser.Math.FloatBetween(0, Math.PI * 2);
-      const distance = OCEAN_WAVE_MIN_DISTANCE * Math.sqrt(1 + 3 * Math.random());
-      const x = source.x + Math.cos(angle) * distance;
-      const y = source.y + Math.sin(angle) * distance;
-      if (x < 0 || x >= MAP_WIDTH || y < 0 || y >= MAP_HEIGHT || !hasClearance(x, y)) continue;
-      addPosition(x, y);
-      placed = true;
-      break;
-    }
-
-    if (!placed) {
-      active[activeSlot] = active[active.length - 1];
-      active.pop();
-    }
-  }
-
-  return positions;
-}
-
-function getOceanWaveMaxAlphaAt(x, y) {
+function getOceanWaveMaxAlphaAt(x, y, clusters) {
   const clusterRadiusSquared = 400 * 400;
-  const belongsToCluster = oceanWaveClusters.some((cluster) => {
+  const belongsToCluster = clusters.some((cluster) => {
     const dx = x - cluster.x;
     const dy = y - cluster.y;
     return dx * dx + dy * dy <= clusterRadiusSquared;
@@ -795,7 +851,9 @@ function getOceanWaveMaxAlphaAt(x, y) {
     : Phaser.Math.FloatBetween(0.12, 0.24);
 }
 
-function updateOceanWaves(dt) {
+function updateOceanWaves(scene, dt) {
+  if (tacticalDisplayActive) return;
+  streamOceanWaves(scene.cameras.main, scene);
   oceanWaves.forEach((wave) => {
     const sprite = wave.sprite;
     wave.age += dt;
@@ -804,7 +862,7 @@ function updateOceanWaves(dt) {
       sprite.setPosition(spawnPosition.x, spawnPosition.y);
       wave.age = 0;
       wave.lifetime = Phaser.Math.FloatBetween(35, 60);
-      wave.maxAlpha = getOceanWaveMaxAlphaAt(spawnPosition.x, spawnPosition.y);
+      wave.maxAlpha = getOceanWaveMaxAlphaAt(spawnPosition.x, spawnPosition.y, wave.chunk.clusters);
       sprite.setTint(randomOceanWaveTint());
     }
     sprite.setAlpha(getOceanWaveAlpha(wave.age, wave.lifetime, wave.maxAlpha));
@@ -823,9 +881,10 @@ function updateOceanWaves(dt) {
 
 function findOceanWaveSpawnPosition(excludedWave) {
   const minDistanceSquared = OCEAN_WAVE_MIN_DISTANCE * OCEAN_WAVE_MIN_DISTANCE;
-  while (true) {
-    const x = Phaser.Math.Between(0, MAP_WIDTH);
-    const y = Phaser.Math.Between(0, MAP_HEIGHT);
+  const chunk = excludedWave.chunk;
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    const x = Phaser.Math.Between(chunk.x, chunk.x + chunk.width);
+    const y = Phaser.Math.Between(chunk.y, chunk.y + chunk.height);
     const overlapsWave = oceanWaves.some((wave) => {
       if (wave === excludedWave) return false;
       const dx = x - wave.sprite.x;
@@ -834,6 +893,7 @@ function findOceanWaveSpawnPosition(excludedWave) {
     });
     if (!overlapsWave) return { x, y };
   }
+  return { x: excludedWave.sprite.x, y: excludedWave.sprite.y };
 }
 
 function getOceanWaveAlpha(age, lifetime, maxAlpha) {
@@ -851,7 +911,6 @@ function update(time, delta) {
   updateSpeedOrderCooldownVisuals();
   if (gamePaused) return;
   const dt = delta / 1000;
-  updateOceanWaves(dt);
   enemyAI.update(this, dt);
   ships.forEach((ship) => updateShip(ship, dt));
   ships = ships.filter((ship) => !ship.sunk);
@@ -859,9 +918,11 @@ function update(time, delta) {
   updateCameraPan(this.cameras.main, cameraPanKeys, dt);
   updateCameraZoom(this.cameras.main, cameraZoomKeys, dt);
   enforceTacticalZoomBounds(this.cameras.main);
+  updateOceanWaves(this, dt);
   updateTacticalSymbols(this.cameras.main);
   resolveShipCollisions(dt);
   updateShells(dt);
+  updateAttachedHitExplosions();
   updateWakes(dt);
   if (firingArcDebugActive) drawFiringArcDebug(this);
 }
@@ -1063,12 +1124,13 @@ function updateHealthBar(ship) {
     : null;
   const barX = -HEALTH_BAR_WIDTH / 2;
   const barY = tacticalDisplayActive
-    ? -(tacticalIconSize.height / 2 + HEALTH_BAR_HEIGHT + 2) * tacticalScale
+    ? -(tacticalIconSize.height / 2 + HEALTH_BAR_HEIGHT + 2)
     : -sprite.displayHeight / 2 + HEALTH_BAR_OFFSET_Y;
   const healthFraction = Phaser.Math.Clamp(health / maxHealth, 0, 1);
 
   healthBar.setPosition(sprite.x, sprite.y);
   healthBar.setScale(tacticalScale);
+  healthBar.setRotation(0);
   healthBar.clear();
 
   // Background/border
@@ -1147,17 +1209,24 @@ function updateTurrets(ship, dt) {
 }
 
 function createFiringHud(scene) {
-  firingModeIndicator = scene.add.text(
-    config.width / 2, 16, "FIRING MODE — right-click to aim, F to toggle, X to stop firing",
-    { fontSize: "16px", color: "#ffffff", backgroundColor: "#7a1010", padding: { x: 12, y: 6 } },
-  ).setOrigin(0.5, 0).setDepth(10).setVisible(false);
-  scene.cameras.main.ignore(firingModeIndicator);
+  const message = "FIRING MODE - RIGHT-CLICK TO AIM, F TO TOGGLE, X TO STOP FIRING";
+  const textWidth = PixelFont.measureLine(message, 2);
+  firingModeIndicatorBackground = scene.add.rectangle(
+    config.width / 2, 28, textWidth + 24, 36, 0x7a1010,
+  ).setDepth(9).setVisible(false);
+  firingModeIndicator = PixelFont.create(scene, message, {
+    x: config.width / 2, y: 21, pixelSize: 2, color: 0xffffff, depth: 10, align: "center",
+  }).setVisible(false);
+  scene.cameras.main.ignore([firingModeIndicatorBackground, firingModeIndicator]);
 }
 
 function setFiringMode(active) {
   if (active && selectedShips.some((ship) => ship.team === TEAMS.ENEMY)) return;
+  if (active && getCommandableShips().length === 0) return;
   firingModeActive = active;
   if (firingModeIndicator) firingModeIndicator.setVisible(firingModeActive);
+  if (firingModeIndicatorBackground) firingModeIndicatorBackground.setVisible(firingModeActive);
+  updateSpeedHud();
 }
 
 function toggleFiringMode() {
@@ -1715,11 +1784,11 @@ function resolveShellSplash(shell) {
       if (isPointSubmerged(ship, shell.targetX, shell.targetY)) {
         spawnSplash(scene, shell.targetX, shell.targetY);
       } else {
-        spawnHitExplosion(scene, shell.targetX, shell.targetY);
+        spawnHitExplosion(scene, shell.targetX, shell.targetY, ship);
       }
     } else {
       ship.health = Math.max(0, ship.health - shell.damage);
-      spawnHitExplosion(scene, shell.targetX, shell.targetY);
+      spawnHitExplosion(scene, shell.targetX, shell.targetY, ship);
     }
     resolved = true;
   });
@@ -1739,14 +1808,37 @@ function spawnSplash(scene, x, y) {
   sprite.once("animationcomplete", () => destroyTacticalHiddenEffect(sprite));
 }
 
-function spawnHitExplosion(scene, x, y) {
+function spawnHitExplosion(scene, x, y, ship) {
   const sprite = scene.add.sprite(x, y, "hit-explosion")
     .setDisplaySize(HIT_EXPLOSION_DISPLAY_SIZE, HIT_EXPLOSION_DISPLAY_SIZE)
     .setDepth(2.9); // above hulls (2) and shells (2.8), below turrets (2.4+ already covers this ship's own turrets since it's higher — see note below)
   worldContainer.add(sprite);
   registerTacticalHiddenEffect(sprite);
   sprite.play("hit-explosion");
-  sprite.once("animationcomplete", () => destroyTacticalHiddenEffect(sprite));
+  const impactOffset = toShipLocal(ship, x, y);
+  const attachment = { sprite, ship, localX: impactOffset.x, localY: impactOffset.y };
+  attachedHitExplosions.add(attachment);
+  sprite.once("animationcomplete", () => {
+    attachedHitExplosions.delete(attachment);
+    destroyTacticalHiddenEffect(sprite);
+  });
+}
+
+function updateAttachedHitExplosions() {
+  attachedHitExplosions.forEach((attachment) => {
+    const { ship, sprite, localX, localY } = attachment;
+    if (ship.sunk || !ship.sprite.active) {
+      attachedHitExplosions.delete(attachment);
+      destroyTacticalHiddenEffect(sprite);
+      return;
+    }
+    const cos = Math.cos(ship.sprite.rotation);
+    const sin = Math.sin(ship.sprite.rotation);
+    sprite.setPosition(
+      ship.sprite.x + localX * cos - localY * sin,
+      ship.sprite.y + localX * sin + localY * cos,
+    );
+  });
 }
 
 function registerTacticalHiddenEffect(sprite) {
@@ -1863,7 +1955,8 @@ function spawnWake(ship) {
     driftX: Math.cos(wakeDriftAngle) * wakeDriftSpeed,
     driftY: Math.sin(wakeDriftAngle) * wakeDriftSpeed,
   });
-  graphics.setVisible(!tacticalDisplayActive);
+  graphics.setVisible(!tacticalDisplayActive
+    && isWithinOceanEffectRange(x, y, scene.cameras.main));
 }
 
 function updateShipWake(ship, dt) {
@@ -1879,7 +1972,10 @@ function updateShipWake(ship, dt) {
 
   if (ship.wakeDistanceAccum >= spacing) {
     ship.wakeDistanceAccum = 0;
-    spawnWake(ship);
+    if (!tacticalDisplayActive
+      && isWithinOceanEffectRange(ship.sprite.x, ship.sprite.y, ship.sprite.scene.cameras.main)) {
+      spawnWake(ship);
+    }
   }
 }
 
@@ -1894,6 +1990,12 @@ function updateWakes(dt) {
       activeWakes.splice(i, 1);
       continue;
     }
+
+    const camera = wake.graphics.scene.cameras.main;
+    const nearCamera = !tacticalDisplayActive
+      && isWithinOceanEffectRange(wake.graphics.x, wake.graphics.y, camera);
+    wake.graphics.setVisible(nearCamera);
+    if (!nearCamera) continue;
 
     // Drift back and outward from the stern while fading and expanding.
     wake.graphics.x += wake.driftX * dt;
@@ -2237,12 +2339,20 @@ function updateSinking(ship, dt) {
 
   ship.sinkElapsed += dt;
   ship.sinkProgress = Phaser.Math.Clamp(ship.sinkElapsed / SINK_DURATION, 0, 1);
-  ensureWaterOverlay(ship, ship.sprite.scene);
-
-  const now = ship.sprite.scene.time.now;
-  if (now - ship.waterOverlayLastUpdate >= 50) {
-    ship.waterOverlayLastUpdate = now;
-    redrawWaterOverlay(ship);
+  const scene = ship.sprite.scene;
+  const camera = scene.cameras.main;
+  const nearCamera = !tacticalDisplayActive
+    && isWithinOceanEffectRange(ship.sprite.x, ship.sprite.y, camera);
+  if (nearCamera) {
+    ensureWaterOverlay(ship, scene);
+    ship.waterOverlay.setVisible(true);
+    const now = scene.time.now;
+    if (now - ship.waterOverlayLastUpdate >= 50) {
+      ship.waterOverlayLastUpdate = now;
+      redrawWaterOverlay(ship);
+    }
+  } else if (ship.waterOverlay) {
+    ship.waterOverlay.setVisible(false);
   }
 
   if (ship.sinkProgress >= 1) finishSinking(ship);
@@ -2270,10 +2380,14 @@ function finishSinking(ship) {
 }
 
 function isPointerOverSpeedHud(pointer) {
-  if (!speedHudButtons) return false;
-  return speedHudButtons.some(
+  const overButton = speedHudButtons && speedHudButtons.some(
     (button) => button.visible && button.getBounds().contains(pointer.x, pointer.y),
   );
+  const overTitle = speedHudTitle?.visible
+    && speedHudTitle.getBounds().contains(pointer.x, pointer.y);
+  const overPopup = speedHudBackdrop?.visible
+    && speedHudBackdrop.getBounds().contains(pointer.x, pointer.y);
+  return Boolean(overButton || overTitle || overPopup);
 }
 
 // The speed a ship should currently be cruising at, based on its speed order.
@@ -2334,52 +2448,86 @@ function applyPendingWaypointSpeedOrder(ship) {
 
 function createSpeedHud(scene) {
   const startX = 45;
-  const startY = config.height - 300;
   const spacing = 40;
+  const panelX = startX - 15;
+  const buttonHeight = 32;
+  const titleHeight = 30;
+  const panelHeight = SPEED_ORDERS.length * spacing + 16;
+  const titleY = config.height - 30 - titleHeight;
+  const listY = titleY - panelHeight - 8;
+  const labelPixelSize = 2;
+  const horizontalPadding = 12;
+  const buttonWidth = Math.max(
+    ...SPEED_ORDERS.map((order) => PixelFont.measureLine(order.label, labelPixelSize)),
+  ) + horizontalPadding * 2;
+  const panelWidth = buttonWidth + 24;
+  const buttonLeft = panelX + 12;
 
-  // Solid backdrop panel behind the buttons, purely so the HUD is unmistakable
-  // when it's visible — makes it easy to tell "not rendering" apart from
-  // "rendering but hard to see".
-  const padding = 20;
-   speedHudTitle = scene.add.rectangle(
-    startX-15,
-    startY-2.5*padding,
-    startX*5,
-    padding*1.5,
+  // The bottom tab stays visible while the speed choices pop upward on demand.
+  speedHudTitle = scene.add.rectangle(
+    panelX,
+    titleY,
+    panelWidth,
+    titleHeight,
     0x0A625B,
     0.85,
-  ).setOrigin(0, 0).setDepth(9).setVisible(false);
+  ).setOrigin(0, 0).setDepth(9).setVisible(false)
+    .setInteractive({ useHandCursor: true })
+    .on("pointerdown", () => {
+      if (!firingModeActive && getCommandableShips().length > 0) {
+        speedHudExpanded = !speedHudExpanded;
+        updateSpeedHud();
+      }
+    });
 
-    speedHudTitleText = scene.add.text(startX, startY-2.2*padding, "Speed Orders", {
-      fontSize: "18px",
-      color: "#ffffff",
-    }).setOrigin(0, 0).setDepth(10).setVisible(false);
+  speedHudTitleText = PixelFont.create(scene, "SPEED ORDERS", {
+    x: panelX + panelWidth / 2,
+    y: titleY + (titleHeight - 7 * 2) / 2,
+    pixelSize: 2,
+    color: 0xffffff,
+    depth: 10,
+    align: "center",
+  }).setVisible(false);
 
   speedHudBackdrop = scene.add.rectangle(
-    startX-15,
-    startY-padding,
-    startX*5,
-    SPEED_ORDERS.length * spacing + 1.5 * padding,
+    panelX,
+    listY,
+    panelWidth,
+    panelHeight,
     0x000000,
     0.55,
   ).setOrigin(0, 0).setDepth(9).setVisible(false);
 
-  speedHudButtons = SPEED_ORDERS.map((order, index) =>
-    scene.add.text(startX, startY + index * spacing, order.label, {
-      fontSize: "15px",
-      color: "#ffffff",
-      backgroundColor: "#0a3d62",
-      padding: { x: 8, y: 6 },
-    })
+  speedHudButtons = SPEED_ORDERS.map((order, index) => {
+    const button = scene.add.rectangle(
+      buttonLeft + buttonWidth / 2,
+      listY + 8 + index * spacing + buttonHeight / 2,
+      buttonWidth,
+      buttonHeight,
+      0x0a3d62,
+    )
       .setDepth(10)
       .setVisible(false)
       .setInteractive({ useHandCursor: true })
-      .on("pointerdown", () => setSpeedOrder(index)),
-  );
+      .on("pointerdown", (pointer, localX, localY, event) => {
+        event.stopPropagation();
+        setSpeedOrder(index);
+        speedHudExpanded = false;
+        updateSpeedHud();
+      });
+    return button;
+  });
+  speedHudLabels = SPEED_ORDERS.map((order, index) => PixelFont.create(scene, order.label, {
+    x: buttonLeft + horizontalPadding,
+    y: listY + 8 + index * spacing + (buttonHeight - 7 * labelPixelSize) / 2,
+    pixelSize: labelPixelSize,
+    color: 0xffffff,
+    depth: 11,
+  }).setVisible(false));
   scene.cameras.main.ignore(speedHudTitle);
   scene.cameras.main.ignore(speedHudTitleText);
   scene.cameras.main.ignore(speedHudBackdrop);
-  scene.cameras.main.ignore(speedHudButtons);
+  scene.cameras.main.ignore([...speedHudButtons, ...speedHudLabels]);
 }
 
 function updateSpeedHud() {
@@ -2387,6 +2535,8 @@ function updateSpeedHud() {
 
   const commandableShips = getCommandableShips();
   const hasSelection = commandableShips.length > 0;
+  const speedHudAlpha = firingModeActive ? 0.2 : speedOrderCooldownVisualAlpha();
+  const canChangeSpeed = hasSelection && !firingModeActive;
 
   let activeIndex = null;
   if (hasSelection) {
@@ -2394,20 +2544,28 @@ function updateSpeedHud() {
     activeIndex = commandableShips.every((ship) => ship.speedOrderIndex === first) ? first : null;
   }
 
-  if (speedHudBackdrop) speedHudBackdrop.setVisible(hasSelection);
   if (speedHudTitle) speedHudTitle.setVisible(hasSelection);
-  if(speedHudTitleText) speedHudTitleText.setVisible(hasSelection);
+  if (speedHudTitleText) speedHudTitleText.setVisible(hasSelection);
+  if (!hasSelection) speedHudExpanded = false;
+  if (speedHudBackdrop) speedHudBackdrop.setVisible(hasSelection && speedHudExpanded);
+  if (speedHudBackdrop) speedHudBackdrop.setAlpha(firingModeActive ? 0.2 : 1);
+  if (speedHudTitle) speedHudTitle.setAlpha(firingModeActive ? 0.2 : 1);
+  if (speedHudTitleText) speedHudTitleText.setAlpha(speedHudAlpha);
+  if (firingModeActive) speedHudTitle.disableInteractive();
+  else speedHudTitle.setInteractive({ useHandCursor: true });
 
 
   speedHudButtons.forEach((button, index) => {
-    button.setVisible(hasSelection);
-    if (hasSelection) {
+    button.setVisible(hasSelection && speedHudExpanded);
+    speedHudLabels[index].setVisible(hasSelection && speedHudExpanded);
+    if (canChangeSpeed) {
       button.setInteractive({ useHandCursor: true });
     } else {
       button.disableInteractive();
     }
-    button.setStyle({ backgroundColor: index === activeIndex ? "#1abc9c" : "#0a3d62" });
-    button.setAlpha(speedOrderCooldownVisualAlpha());
+    button.setFillStyle(index === activeIndex ? 0x1abc9c : 0x0a3d62);
+    button.setAlpha(speedHudAlpha);
+    speedHudLabels[index].setAlpha(speedHudAlpha);
   });
 }
 
@@ -2422,8 +2580,12 @@ function speedOrderCooldownVisualAlpha() {
 
 function updateSpeedOrderCooldownVisuals() {
   if (!speedHudButtons) return;
-  const alpha = speedOrderCooldownVisualAlpha();
+  const alpha = firingModeActive ? 0.2 : speedOrderCooldownVisualAlpha();
   speedHudButtons.forEach((button) => button.setAlpha(alpha));
+  speedHudLabels.forEach((label) => label.setAlpha(alpha));
+  if (speedHudTitleText) speedHudTitleText.setAlpha(alpha);
+  if (speedHudTitle) speedHudTitle.setAlpha(firingModeActive ? 0.2 : 1);
+  if (speedHudBackdrop) speedHudBackdrop.setAlpha(firingModeActive ? 0.2 : 1);
 }
 
 function issueMoveOrder(x, y, append) {
@@ -2757,12 +2919,9 @@ function createTacticalDisplayUI(scene) {
     0x0a2534,
     1,
   ).setOrigin(1, 0).setDepth(51);
-  const label = scene.add.text(config.width - 26, 21, "TACTICAL DISPLAY", {
-    fontFamily: "monospace",
-    fontSize: "16px",
-    color: "#9ef2db",
-    letterSpacing: 1,
-  }).setOrigin(1, 0).setDepth(52);
+  const label = PixelFont.create(scene, "TACTICAL DISPLAY", {
+    x: config.width - 26, y: 21, pixelSize: 2, color: 0x9ef2db, depth: 52, align: "right",
+  });
   tacticalFrame = [frame, labelBackground, label];
   scene.cameras.main.ignore(tacticalFrame);
   tacticalFrame.forEach((element) => element.setVisible(false));
@@ -2809,8 +2968,11 @@ function setTacticalDisplay(scene, active) {
     oceanBackground.setFillStyle(0x06345a, 1);
     tacticalGrid.setVisible(false);
     tacticalHiddenEffects.forEach((effect) => effect.setVisible(true));
+    streamOceanWaves(camera, scene);
     oceanWaves.forEach(({ sprite }) => sprite.setVisible(true));
-    activeWakes.forEach(({ graphics }) => graphics.setVisible(true));
+    activeWakes.forEach(({ graphics }) => graphics.setVisible(
+      isWithinOceanEffectRange(graphics.x, graphics.y, camera),
+    ));
     ships.forEach((ship) => {
       ship.tacticalSymbol.setVisible(false);
       ship.sprite.setVisible(true);
@@ -2935,7 +3097,8 @@ function restoreShipVisual(ship) {
     return;
   }
 
-  ship.wakeSprite.setVisible(!tacticalDisplayActive);
+  ship.wakeSprite.setVisible(!tacticalDisplayActive
+    && isWithinOceanEffectRange(ship.sprite.x, ship.sprite.y, ship.sprite.scene.cameras.main));
   ship.wakeSprite.setTexture(wake.wakeKey, wake.wakeFrame);
   ship.wakeSprite.setDisplaySize(stats.displayWidth, stats.displayHeight);
   ship.wakeSprite.anims.timeScale = ship.slowingDown
@@ -2955,7 +3118,8 @@ function syncShipAnimationFrame(ship) {
     return;
   }
 
-  ship.wakeSprite.setVisible(!tacticalDisplayActive);
+  ship.wakeSprite.setVisible(!tacticalDisplayActive
+    && isWithinOceanEffectRange(ship.sprite.x, ship.sprite.y, ship.sprite.scene.cameras.main));
   ship.wakeSprite.setTexture(wake.wakeKey, wake.wakeFrame);
   ship.wakeSprite.setDisplaySize(ship.stats.displayWidth, ship.stats.displayHeight);
 }
