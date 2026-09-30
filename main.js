@@ -1972,8 +1972,9 @@ function updateShipWake(ship, dt) {
 
   if (ship.wakeDistanceAccum >= spacing) {
     ship.wakeDistanceAccum = 0;
-    if (!tacticalDisplayActive
-      && isWithinOceanEffectRange(ship.sprite.x, ship.sprite.y, ship.sprite.scene.cameras.main)) {
+    const shouldGenerateWake = ship.team === TEAMS.ENEMY
+      || isWithinOceanEffectRange(ship.sprite.x, ship.sprite.y, ship.sprite.scene.cameras.main);
+    if (!tacticalDisplayActive && shouldGenerateWake) {
       spawnWake(ship);
     }
   }
