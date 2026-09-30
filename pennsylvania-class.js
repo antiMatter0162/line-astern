@@ -13,7 +13,7 @@ registerShipType({
     turretB: "pennsylvania-turret-b",
   },
   assetPaths: {
-    hullStationary: "assets/Pennyslvania-Class.png",
+    hullStationary: "assets/Pennsylvania-Class.png",
     wakeMoving: "assets/Pennsylvania-Wake.png",
     wakeAcceleration: "assets/Pennsylvania-Acceleration.png",
     turretA: "assets/Pennsylvania Turret A.png",
@@ -54,7 +54,7 @@ registerShipType({
   backFiringArc: Phaser.Math.DegToRad(235),
 
   minFiringDistance: 150,
-  maxFiringDistance: 3200,
+  maxFiringDistance: 4500,
 
   // vertical = across beam line, horizontal = perpendicular to beam line
   dispersionCurve: {

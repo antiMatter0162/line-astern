@@ -17,6 +17,7 @@
     "files": [
       "electron-main.js",
       "index.html",
+      "enemy-ai.js",
       "main.js",
       "ship-types.js",
       "assets/**/*"

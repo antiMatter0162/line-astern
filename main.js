@@ -52,6 +52,23 @@ let panStart = null;
 let waypointMarkers = [];
 let cameraPanKeys = null;
 let cameraZoomKeys = null;
+let cameraFocusShip = null;
+let cameraPanTarget = null;
+let tacticalDisplayActive = false;
+let tacticalSavedCamera = null;
+let tacticalGrid = null;
+let tacticalFrame = null;
+let oceanBackground = null;
+const tacticalHiddenEffects = new Set();
+const TACTICAL_SYMBOL_WIDTH = 55;
+const TACTICAL_SYMBOL_HEIGHT = 82.5;
+// Measured alpha bounds: ship symbol hulls are 240x720 in 480x720 images;
+// the outline mask is 270x750 in a 480x750 image.
+const TACTICAL_OUTLINE_WIDTH = (TACTICAL_SYMBOL_WIDTH * (240 / 480) + 2) * (480 / 270);
+const TACTICAL_OUTLINE_HEIGHT = TACTICAL_SYMBOL_HEIGHT + 2;
+const TACTICAL_MIN_ZOOM = 0.1;
+const TACTICAL_MAX_ZOOM = 0.5;
+const TACTICAL_SYMBOL_TEXTURES = ["tactical-bb", "tactical-ca", "tactical-cl", "tactical-dd"];
 const waypointSize = 48;
 const waypointSourceSize = 480;
 const waypointReachLeeway = 0;
@@ -59,6 +76,7 @@ const turnWindowLeeway = 3;
 
 const WAKE_FPS = 12;
 const CAMERA_PAN_SPEED = 450;
+const CAMERA_FOCUS_RESPONSE = 14;
 const MAP_WIDTH = 12800;
 const MAP_HEIGHT = 8000;
 const OCEAN_WAVE_FRAME_SIZE = 480;
@@ -145,8 +163,10 @@ function resetSustainedAimForTurn(ship, targetX, targetY) {
 
 //sinking parameters
 const SINK_DURATION = 30; 
+const DEATH_DRIFT_SECONDS = 1.25;
 const SINK_PIXEL = 1;
 const SINK_WATER_OVERLAP = 2;
+const SINK_WATER_MARGIN = 4;
 const SINK_JITTER = 0.35;
 const SINK_LIST_ANGLE = 0.5; 
 const SINK_FOAM_DENSITY = 0.35;
@@ -165,10 +185,22 @@ const SPEED_ORDERS = [
 const DEFAULT_SPEED_ORDER_INDEX = 2; // Ahead Standard
 const SPEED_ORDER_COOLDOWN_MS = 5000;
 const WAYPOINT_SPEED_ORDER_GRACE_MS = 750;
-const ENEMY_AI_DECISION_INTERVAL = 0.75;
-const ENEMY_AI_WAYPOINT_INTERVAL_MS = 20000;
-const ENEMY_AI_TARGET_SWITCH_RANGE_FACTOR = 0.85;
-let enemyAiDecisionClock = 0;
+
+const enemyAI = window.createEnemyAI({
+  Phaser,
+  getShips: () => ships,
+  getSelectedShips: () => selectedShips,
+  teams: TEAMS,
+  mapWidth: MAP_WIDTH,
+  mapHeight: MAP_HEIGHT,
+  speedOrders: SPEED_ORDERS,
+  defaultSpeedOrderIndex: DEFAULT_SPEED_ORDER_INDEX,
+  setShipSpeedOrder,
+  resetSustainedAimForTurn,
+  removeWaypointMarker,
+  createFireTarget,
+  refreshShipDispersionEllipse,
+});
 let speedHudButtons = null;
 let speedHudBackdrop = null;
 let speedHudTitle = null;
@@ -178,6 +210,11 @@ function preload() {
   this.load.image("selection-circle", "assets/Selection-Circle.png");
   this.load.image("selection-circle-enemy", "assets/Selection-Circle-Enemy.png");
   this.load.image("waypoint", "assets/Waypoint.png");
+  this.load.image("tactical-bb", "assets/BB-Symbol.png");
+  this.load.image("tactical-ca", "assets/CA-Symbol.png");
+  this.load.image("tactical-cl", "assets/CL-Symbol.png");
+  this.load.image("tactical-dd", "assets/DD-Symbol.png");
+  this.load.image("tactical-selection-outline", "assets/Tactical-Selection-Circle.png");
   this.load.image("shell", "assets/Shell.png");
   this.load.spritesheet("ocean-wave", "assets/Wave.png", {
     frameWidth: OCEAN_WAVE_FRAME_SIZE,
@@ -315,6 +352,7 @@ function createShipContextMenu(scene) {
       const ship = shipContextMenu.ship;
       if (ship && !ship.sinking) {
         ship.hostile = !ship.hostile;
+        ship.identified = ship.hostile;
         ship.hostileRing.setVisible(ship.hostile);
       }
       closeShipContextMenu();
@@ -366,10 +404,11 @@ function create() {
   initializeShellSpritePool(this);
 
   // Uniform deep-blue ocean background
-  worldContainer.add(this.add.rectangle(6400, 4000, 12800, 8000, 0x06345a));
+  oceanBackground = this.add.rectangle(6400, 4000, 12800, 8000, 0x06345a);
+  worldContainer.add(oceanBackground);
 
   const camera = this.cameras.main;
-  camera.setBounds(0, 0, 12800, 8000);
+  camera.setBounds(0, 0, MAP_WIDTH, MAP_HEIGHT);
   camera.centerOn(6400, 4000);
 
   cameraPanKeys = setupCameraPanKeys(this);
@@ -380,11 +419,26 @@ function create() {
   uiCamera.ignore(worldContainer);
   uiCamera.setScroll(0, 0);
   uiCamera.setZoom(1);
+  createTacticalDisplayUI(this);
   createShipContextMenu(this);
 
   this.input.on("wheel", (pointer, currentlyOver, deltaX, deltaY)  => {
     if (gamePaused) return;
-    setCameraZoom(camera, camera.zoom - deltaY * 0.001);
+    if (pointer.event && pointer.event.preventDefault) pointer.event.preventDefault();
+    const maintainingFocus = Boolean(cameraFocusShip || cameraPanTarget);
+    const previousZoom = camera.zoom;
+    const cursorOffsetX = pointer.x - (camera.x + camera.width * camera.originX);
+    const cursorOffsetY = pointer.y - (camera.y + camera.height * camera.originY);
+    if (tacticalDisplayActive) {
+      setCameraZoom(camera, camera.zoom * Math.exp(-deltaY * 0.001));
+    } else {
+      setCameraZoom(camera, camera.zoom - deltaY * 0.001);
+    }
+    if (!maintainingFocus) {
+      const zoom = camera.zoom;
+      camera.scrollX += cursorOffsetX * (1 / previousZoom - 1 / zoom);
+      camera.scrollY += cursorOffsetY * (1 / previousZoom - 1 / zoom);
+    }
   });
 
   // Every registered ship type gets its own set of WAKE animations
@@ -455,6 +509,10 @@ function create() {
     repeat: -1,
   });
   this.textures.get("ocean-wave").setFilter(Phaser.Textures.FilterMode.NEAREST);
+  TACTICAL_SYMBOL_TEXTURES.forEach((texture) => {
+    this.textures.get(texture).setFilter(Phaser.Textures.FilterMode.NEAREST);
+  });
+  this.textures.get("tactical-selection-outline").setFilter(Phaser.Textures.FilterMode.NEAREST);
   createOceanWaves(this);
 
   // Speed order shortcuts: 1=Ahead 1/3 ... 5=Ahead Flank
@@ -470,16 +528,31 @@ function create() {
   createCannotAimHud(this);
   createPauseOverlay(this);
   this.input.keyboard.on("keydown-ESC", togglePause);
+  this.input.keyboard.on("keydown-TAB", (event) => {
+    event.preventDefault();
+    if (gamePaused || event.repeat) return;
+    focusCameraOnTab(this.cameras.main);
+  });
+  this.input.keyboard.on("keydown-T", (event) => {
+    event.preventDefault();
+    if (gamePaused || event.repeat) return;
+    setTacticalDisplay(this, !tacticalDisplayActive);
+  });
   this.input.keyboard.on("keydown-F", () => { if (!gamePaused) toggleFiringMode(); });
   this.input.keyboard.on("keydown-X", () => { if (!gamePaused) stopFiring(); });
   this.input.keyboard.on("keydown-S", () => { if (!gamePaused) stopSelectedShips(); });
   //this.input.keyboard.on("keydown-PERIOD", killSelectedShips); // debug: force-sink selected ships
-  this.input.keyboard.on("keydown-P", () => {
-    if (gamePaused) return;
-    if (!firingModeActive) return; // arc overlay only makes sense while firing mode is on
-    firingArcDebugActive = !firingArcDebugActive;
-    if (!firingArcDebugActive) clearFiringArcDebug();
-    if (firingArcDebugActive) drawFiringArcDebug(this);
+  this.input.keyboard.on("keydown", (event) => {
+    if (event.code !== "AltLeft" || firingArcDebugActive) return;
+    event.preventDefault();
+    firingArcDebugActive = true;
+    drawFiringArcDebug(this);
+  });
+  this.input.keyboard.on("keyup", (event) => {
+    if (event.code !== "AltLeft" || !firingArcDebugActive) return;
+    event.preventDefault();
+    firingArcDebugActive = false;
+    clearFiringArcDebug();
   });
 
   this.input.on("pointerdown", (pointer) => {
@@ -489,6 +562,8 @@ function create() {
       return;
     }
     if (pointer.middleButtonDown()) {
+      cameraFocusShip = null;
+      cameraPanTarget = null;
       panStart = { x: pointer.x, y: pointer.y };
       return;
     }
@@ -496,6 +571,10 @@ function create() {
       return;
     }
     if (pointer.rightButtonDown()) {
+      if (tacticalDisplayActive) {
+        issueMoveOrder(pointer.worldX, pointer.worldY, Boolean(pointer.event && pointer.event.shiftKey));
+        return;
+      }
       if (firingModeActive) {
         issueFireOrder(pointer.worldX, pointer.worldY);
       } else {
@@ -509,6 +588,12 @@ function create() {
       return;
     }
 
+    if (tacticalDisplayActive) {
+      cameraFocusShip = null;
+      cameraPanTarget = null;
+      panStart = { x: pointer.x, y: pointer.y };
+    }
+
     const shiftHeld = Boolean(pointer.event && pointer.event.shiftKey);
 
     // Find the ship under the click, if any (closest one wins if overlapping)
@@ -516,8 +601,18 @@ function create() {
     let clickedDist = Infinity;
     ships.forEach((ship) => {
       if (ship.sinking || ship.sunk) return;
+      if (tacticalDisplayActive && ship.team !== TEAMS.PLAYER) return;
       const dist = Phaser.Math.Distance.Between(pointer.worldX, pointer.worldY, ship.sprite.x, ship.sprite.y);
-      if (isWithinShipSelectionCircle(ship, pointer.worldX, pointer.worldY) && dist < clickedDist) {
+      let hit;
+      if (tacticalDisplayActive) {
+        const iconSize = getTacticalSymbolScreenSize(this.cameras.main.zoom);
+        const normalizedX = (pointer.worldX - ship.sprite.x) * this.cameras.main.zoom / (iconSize.width / 2);
+        const normalizedY = (pointer.worldY - ship.sprite.y) * this.cameras.main.zoom / (iconSize.height / 2);
+        hit = normalizedX * normalizedX + normalizedY * normalizedY <= 1;
+      } else {
+        hit = isWithinShipSelectionCircle(ship, pointer.worldX, pointer.worldY);
+      }
+      if (hit && dist < clickedDist) {
         clickedShip = ship;
         clickedDist = dist;
       }
@@ -527,7 +622,7 @@ function create() {
       if (clickedShip) {
         const idx = selectedShips.indexOf(clickedShip);
         if (idx === -1) {
-          clickedShip.selectedRing.setVisible(true);
+          clickedShip.selectedRing.setVisible(!tacticalDisplayActive);
           selectedShips.push(clickedShip);
         } else {
           clickedShip.selectedRing.setVisible(false);
@@ -539,11 +634,13 @@ function create() {
       selectedShips.forEach((s) => s.selectedRing.setVisible(false));
       selectedShips = [];
       if (clickedShip) {
-        clickedShip.selectedRing.setVisible(true);
+        clickedShip.selectedRing.setVisible(!tacticalDisplayActive);
         selectedShips.push(clickedShip);
       }
       setFiringMode(false);
     }
+
+    if (cameraFocusShip && !selectedShips.includes(cameraFocusShip)) cameraFocusShip = null;
 
     updateSpeedHud();
     updateDispersionEllipseVisibility();
@@ -719,7 +816,7 @@ function updateOceanWaves(dt) {
       const clearance = OCEAN_WAVE_CLEARANCE + Math.max(ship.stats.displayWidth, ship.stats.displayHeight) / 2;
       return dx * dx + dy * dy < clearance * clearance;
     });
-    sprite.setVisible(!nearSinkingShip);
+    sprite.setVisible(!tacticalDisplayActive && !nearSinkingShip);
   });
 
 }
@@ -755,169 +852,18 @@ function update(time, delta) {
   if (gamePaused) return;
   const dt = delta / 1000;
   updateOceanWaves(dt);
-  updateEnemyAI(this, dt);
+  enemyAI.update(this, dt);
   ships.forEach((ship) => updateShip(ship, dt));
   ships = ships.filter((ship) => !ship.sunk);
+  updateCameraFocus(this.cameras.main, dt);
   updateCameraPan(this.cameras.main, cameraPanKeys, dt);
   updateCameraZoom(this.cameras.main, cameraZoomKeys, dt);
+  enforceTacticalZoomBounds(this.cameras.main);
+  updateTacticalSymbols(this.cameras.main);
   resolveShipCollisions(dt);
   updateShells(dt);
   updateWakes(dt);
   if (firingArcDebugActive) drawFiringArcDebug(this);
-}
-
-function updateEnemyAI(scene, dt) {
-  enemyAiDecisionClock += dt;
-  if (enemyAiDecisionClock < ENEMY_AI_DECISION_INTERVAL) return;
-  enemyAiDecisionClock %= ENEMY_AI_DECISION_INTERVAL;
-
-  const playerShips = ships.filter(
-    (ship) => ship.team === TEAMS.PLAYER && !ship.sinking && !ship.sunk,
-  );
-  ships.forEach((enemy) => {
-    if (enemy.team !== TEAMS.ENEMY || enemy.sinking || enemy.sunk) return;
-    const nearestPlayer = playerShips
-      .map((target) => ({
-        target,
-        distance: Phaser.Math.Distance.Between(
-          enemy.sprite.x, enemy.sprite.y, target.sprite.x, target.sprite.y,
-        ),
-      }))
-      .sort((a, b) => a.distance - b.distance)[0];
-
-    if (!nearestPlayer) {
-      clearEnemyAiTarget(enemy);
-      clearEnemyAiDestination(enemy);
-      return;
-    }
-
-    const currentTarget = playerShips.find((candidate) => candidate === enemy.aiTargetShip);
-    const currentTargetDistance = currentTarget
-      ? Phaser.Math.Distance.Between(
-        enemy.sprite.x, enemy.sprite.y, currentTarget.sprite.x, currentTarget.sprite.y,
-      )
-      : Infinity;
-    const canSwitchTarget = !currentTarget
-      || currentTargetDistance >= enemy.stats.maxFiringDistance * ENEMY_AI_TARGET_SWITCH_RANGE_FACTOR;
-    const target = currentTarget && !canSwitchTarget ? currentTarget : nearestPlayer.target;
-    const targetDistance = target === currentTarget
-      ? currentTargetDistance
-      : Phaser.Math.Distance.Between(
-        enemy.sprite.x, enemy.sprite.y, target.sprite.x, target.sprite.y,
-      );
-    if (enemy.aiTargetShip !== target) {
-      enemy.aiTargetShip = target;
-      enemy.aiFormationSide = chooseEnemyFormationSide(enemy, target);
-    }
-
-    const desiredRange = getEnemyAiEngagementRange(enemy);
-    const targetHeading = target.sprite.rotation - Math.PI / 2;
-    const beamAngle = targetHeading + Math.PI / 2;
-    const side = enemy.aiFormationSide || 1;
-    const destination = {
-      x: Phaser.Math.Clamp(
-        target.sprite.x + Math.cos(beamAngle) * desiredRange * side,
-        0, MAP_WIDTH,
-      ),
-      y: Phaser.Math.Clamp(
-        target.sprite.y + Math.sin(beamAngle) * desiredRange * side,
-        0, MAP_HEIGHT,
-      ),
-    };
-    const distanceToFormation = Phaser.Math.Distance.Between(
-      enemy.sprite.x, enemy.sprite.y, destination.x, destination.y,
-    );
-    setEnemyAiSpeed(enemy, target, distanceToFormation);
-    setEnemyAiDestination(scene, enemy, destination);
-    updateEnemyAiFireOrder(enemy, target, targetDistance);
-  });
-}
-
-function chooseEnemyFormationSide(enemy, target) {
-  const beamAngle = target.sprite.rotation;
-  const dx = enemy.sprite.x - target.sprite.x;
-  const dy = enemy.sprite.y - target.sprite.y;
-  return dx * Math.cos(beamAngle) + dy * Math.sin(beamAngle) >= 0 ? 1 : -1;
-}
-
-// Keep the desired range tied to weapon stats so future ship classes can
-// adjust engagement distance by adding class-specific values here.
-function getEnemyAiEngagementRange(ship) {
-  const { minFiringDistance, maxFiringDistance } = ship.stats;
-  const upperBound = Math.min(1300, maxFiringDistance - 100);
-  return Phaser.Math.Clamp(maxFiringDistance * 0.45, minFiringDistance + 200, upperBound);
-}
-
-function setEnemyAiSpeed(ship, target, distanceToFormation) {
-  let desiredOrderIndex;
-  if (distanceToFormation > 700) {
-    desiredOrderIndex = SPEED_ORDERS.length - 1; // Ahead Flank for the long approach
-  } else if (distanceToFormation > 300) {
-    desiredOrderIndex = 3; // Ahead Full while closing
-  } else if (distanceToFormation > 120) {
-    desiredOrderIndex = DEFAULT_SPEED_ORDER_INDEX;
-  } else {
-    const targetSpeedFraction = target.speed / ship.maxSpeed;
-    desiredOrderIndex = SPEED_ORDERS.reduce((bestIndex, order, index) => {
-      const bestDelta = Math.abs(SPEED_ORDERS[bestIndex].fraction - targetSpeedFraction);
-      return Math.abs(order.fraction - targetSpeedFraction) < bestDelta ? index : bestIndex;
-    }, 0);
-  }
-  setShipSpeedOrder(ship, desiredOrderIndex);
-}
-
-function setEnemyAiDestination(scene, ship, destination) {
-  if (ship.target && ship.target.isBoundaryTurn) return;
-  const now = scene.time.now;
-  if (now - ship.aiLastWaypointChange < ENEMY_AI_WAYPOINT_INTERVAL_MS) return;
-
-  resetSustainedAimForTurn(ship, destination.x, destination.y);
-  ship.target = { ...destination, isAiWaypoint: true };
-  ship.waypoints = [];
-  ship.braking = false;
-  ship.continueStraightAfterWaypoint = true;
-  ship.aiLastWaypointChange = now;
-  if (ship.pathLine) {
-    ship.pathLine.destroy();
-    ship.pathLine = null;
-  }
-}
-
-function clearEnemyAiDestination(ship) {
-  if (ship.target && ship.target.isAiWaypoint) ship.target = null;
-  ship.aiTargetShip = null;
-  ship.aiFormationSide = null;
-  ship.waypoints.forEach(removeWaypointMarker);
-  ship.waypoints = [];
-  if (ship.pathLine) {
-    ship.pathLine.destroy();
-    ship.pathLine = null;
-  }
-}
-
-function updateEnemyAiFireOrder(ship, target, distance) {
-  const inRange = distance >= ship.stats.minFiringDistance
-    && distance <= ship.stats.maxFiringDistance;
-  if (!inRange) {
-    clearEnemyAiTarget(ship);
-    return;
-  }
-
-  if (ship.fireTarget && ship.fireTarget.targetShip === target) return;
-  ship.fireTarget = createFireTarget(target.sprite.x, target.sprite.y, target);
-  if (selectedShips.includes(ship)) refreshShipDispersionEllipse(ship);
-  else if (ship.dispersionEllipse) {
-    ship.dispersionEllipse.destroy();
-    ship.dispersionEllipse = null;
-  }
-}
-
-function clearEnemyAiTarget(ship) {
-  ship.fireTarget = null;
-  if (ship.dispersionEllipse) {
-    ship.dispersionEllipse.destroy();
-    ship.dispersionEllipse = null;
-  }
 }
 
 // ---- Ship creation & behavior ----
@@ -934,6 +880,17 @@ function createShip(scene, x, y, typeId, team = TEAMS.PLAYER, initialRotation = 
     .setDisplaySize(stats.displayWidth, stats.displayHeight)
     .setDepth(2)
     .setRotation(initialRotation);
+
+  const symbolTexture = TACTICAL_SYMBOL_TEXTURES[Phaser.Math.Clamp(stats.shipClass, 0, 3)];
+  const tacticalSymbol = scene.add.image(x, y, symbolTexture)
+    .setDisplaySize(TACTICAL_SYMBOL_WIDTH, TACTICAL_SYMBOL_HEIGHT)
+    .setDepth(3)
+    .setVisible(false);
+  tacticalSymbol.setTint(team === TEAMS.PLAYER ? 0x62f0c8 : 0xff625f);
+  const tacticalOutlineGlow = scene.add.image(x, y, "tactical-selection-outline")
+    .setDisplaySize(TACTICAL_OUTLINE_WIDTH, TACTICAL_OUTLINE_HEIGHT)
+    .setDepth(3.1)
+    .setVisible(false);
 
   // Wake: separate sprite drawn just above the hull, hidden until the ship
   // moves. Owns every animation (moving loop, slowdown, acceleration).
@@ -975,10 +932,15 @@ function createShip(scene, x, y, typeId, team = TEAMS.PLAYER, initialRotation = 
 
   const healthBar = scene.add.graphics().setDepth(3.5).setVisible(false);
 
-  worldContainer.add([sprite, wakeSprite, hostileRing, selectedRing, minRangeCircle, maxRangeCircle, healthBar]);
+  worldContainer.add([
+    sprite, wakeSprite, hostileRing, selectedRing, minRangeCircle, maxRangeCircle,
+    healthBar, tacticalOutlineGlow, tacticalSymbol,
+  ]);
 
   return {
     sprite,
+    tacticalSymbol,
+    tacticalOutlineGlow,
     wakeSprite,
     turrets,
     stats,
@@ -994,6 +956,7 @@ function createShip(scene, x, y, typeId, team = TEAMS.PLAYER, initialRotation = 
     pathPreviewDirty: true,
     pathPreviewPoints: null,
     pathPreviewStart: null,
+    pathPreviewLastRedrawAt: -Infinity,
     pathPreviewLastDrawPosition: null,
     pathPreviewDrawIndex: 0,
     pathPreviewAvoidance: { x: 0, y: 0 },
@@ -1018,10 +981,8 @@ function createShip(scene, x, y, typeId, team = TEAMS.PLAYER, initialRotation = 
     speedOrderCooldownUntil: 0,
     collisionRadius: stats.collisionRadius,
     team,
+    identified: team !== TEAMS.ENEMY,
     hostile: false,
-    aiTargetShip: null,
-    aiFormationSide: null,
-    aiLastWaypointChange: -Infinity,
     continueStraightAfterWaypoint: false,
     pendingWaypointSpeedOrder: false,
     waypointSpeedOrderDueAt: 0,
@@ -1096,10 +1057,18 @@ function updateHealthBar(ship) {
   if (!isSelected) return;
 
   const { healthBar, sprite, health, maxHealth } = ship;
-  const barX = sprite.x - HEALTH_BAR_WIDTH / 2;
-  const barY = sprite.y - sprite.displayHeight / 2 + HEALTH_BAR_OFFSET_Y;
+  const tacticalScale = tacticalDisplayActive ? 1 / sprite.scene.cameras.main.zoom : 1;
+  const tacticalIconSize = tacticalDisplayActive
+    ? getTacticalSymbolScreenSize(sprite.scene.cameras.main.zoom)
+    : null;
+  const barX = -HEALTH_BAR_WIDTH / 2;
+  const barY = tacticalDisplayActive
+    ? -(tacticalIconSize.height / 2 + HEALTH_BAR_HEIGHT + 2) * tacticalScale
+    : -sprite.displayHeight / 2 + HEALTH_BAR_OFFSET_Y;
   const healthFraction = Phaser.Math.Clamp(health / maxHealth, 0, 1);
 
+  healthBar.setPosition(sprite.x, sprite.y);
+  healthBar.setScale(tacticalScale);
   healthBar.clear();
 
   // Background/border
@@ -1189,11 +1158,6 @@ function setFiringMode(active) {
   if (active && selectedShips.some((ship) => ship.team === TEAMS.ENEMY)) return;
   firingModeActive = active;
   if (firingModeIndicator) firingModeIndicator.setVisible(firingModeActive);
-
-  if (!firingModeActive && firingArcDebugActive) {
-    firingArcDebugActive = false;
-    clearFiringArcDebug();
-  }
 }
 
 function toggleFiringMode() {
@@ -1497,7 +1461,7 @@ function updateDispersionEllipseTransform(ship) {
 function updateDispersionEllipseVisibility() {
   ships.forEach((ship) => {
     if (ship.dispersionEllipse) {
-      ship.dispersionEllipse.setVisible(selectedShips.includes(ship));
+      ship.dispersionEllipse.setVisible(!tacticalDisplayActive && selectedShips.includes(ship));
     }
   });
 }
@@ -1770,8 +1734,9 @@ function spawnSplash(scene, x, y) {
     .setDisplaySize(SPLASH_DISPLAY_SIZE, SPLASH_DISPLAY_SIZE)
     .setDepth(1.9); // above ocean/markers, still well under any hull
   worldContainer.add(sprite);
+  registerTacticalHiddenEffect(sprite);
   sprite.play("splash");
-  sprite.once("animationcomplete", () => sprite.destroy());
+  sprite.once("animationcomplete", () => destroyTacticalHiddenEffect(sprite));
 }
 
 function spawnHitExplosion(scene, x, y) {
@@ -1779,8 +1744,19 @@ function spawnHitExplosion(scene, x, y) {
     .setDisplaySize(HIT_EXPLOSION_DISPLAY_SIZE, HIT_EXPLOSION_DISPLAY_SIZE)
     .setDepth(2.9); // above hulls (2) and shells (2.8), below turrets (2.4+ already covers this ship's own turrets since it's higher — see note below)
   worldContainer.add(sprite);
+  registerTacticalHiddenEffect(sprite);
   sprite.play("hit-explosion");
-  sprite.once("animationcomplete", () => sprite.destroy());
+  sprite.once("animationcomplete", () => destroyTacticalHiddenEffect(sprite));
+}
+
+function registerTacticalHiddenEffect(sprite) {
+  tacticalHiddenEffects.add(sprite);
+  sprite.setVisible(!tacticalDisplayActive);
+}
+
+function destroyTacticalHiddenEffect(sprite) {
+  tacticalHiddenEffects.delete(sprite);
+  sprite.destroy();
 }
 
 // ---- Wake trail ----
@@ -1887,6 +1863,7 @@ function spawnWake(ship) {
     driftX: Math.cos(wakeDriftAngle) * wakeDriftSpeed,
     driftY: Math.sin(wakeDriftAngle) * wakeDriftSpeed,
   });
+  graphics.setVisible(!tacticalDisplayActive);
 }
 
 function updateShipWake(ship, dt) {
@@ -2057,24 +2034,30 @@ function resolveShipCollisions(dt) {
 function beginSinking(ship) {
   if (ship.sinking) return;
   const scene = ship.sprite.scene;
-
-  ship.sprite.setDepth(SINKING_HULL_DEPTH);
-  ship.turrets.forEach((turret) => turret.sprite.setDepth(SINKING_TURRET_DEPTH));
-
+  ship.sinking = true;
+  ship.deathDriftSpeed = ship.speed;
+  ship.deathDriftHeading = ship.sprite.rotation - Math.PI / 2;
+  ship.deathDriftElapsed = 0;
+  ship.deathDriftRemaining = ship.deathDriftSpeed * DEATH_DRIFT_SECONDS / 2;
   const explosionSize = Math.max(ship.stats.displayWidth, ship.stats.displayHeight) * 0.6;
   const explosionSprite = scene.add.sprite(ship.sprite.x, ship.sprite.y, "explosion")
     .setDisplaySize(explosionSize, explosionSize)
-    .setDepth(SINKING_EXPLOSION_DEPTH); // above hull/turrets/health bar, below HUD text
+    .setDepth(SINKING_EXPLOSION_DEPTH);
   worldContainer.add(explosionSprite);
+  registerTacticalHiddenEffect(explosionSprite);
   explosionSprite.play("explosion");
-  explosionSprite.once("animationcomplete", () => explosionSprite.destroy());
+  explosionSprite.once("animationcomplete", () => destroyTacticalHiddenEffect(explosionSprite));
 
-  ship.sinking = true;
+  ship.listSide = Math.random() < 0.5 ? 1 : -1;
+  ship.waterlineSeed = {
+    a: Phaser.Math.FloatBetween(0, Math.PI * 2),
+    b: Phaser.Math.FloatBetween(0, Math.PI * 2),
+    c: Phaser.Math.FloatBetween(0, Math.PI * 2),
+  };
   ship.continueStraightAfterWaypoint = false;
   ship.hostileRing.setVisible(false);
   ship.sinkElapsed = 0;
   ship.sinkProgress = 0;
-  ship.listSide = Math.random() < 0.5 ? 1 : -1; // which beam floods first
 
   if (ship.target) removeWaypointMarker(ship.target);
   ship.waypoints.forEach(removeWaypointMarker);
@@ -2103,19 +2086,24 @@ function beginSinking(ship) {
   ship.healthBar.setVisible(false);
   ship.wakeSprite.setVisible(false);
   updateSpeedHud();
+  if (ship.deathDriftRemaining <= 0) startSinkingAnimation(ship, scene);
+}
 
-  ship.listSide = Math.random() < 0.5 ? 1 : -1; // which beam floods first
+function startSinkingAnimation(ship, scene) {
+  ship.sprite.setDepth(SINKING_HULL_DEPTH);
+  ship.turrets.forEach((turret) => turret.sprite.setDepth(SINKING_TURRET_DEPTH));
+  ship.wakeSprite.setVisible(false);
   ship.deathRotation = ship.sprite.rotation;
 
-  ship.waterlineSeed = {
-    a: Phaser.Math.FloatBetween(0, Math.PI * 2),
-    b: Phaser.Math.FloatBetween(0, Math.PI * 2),
-    c: Phaser.Math.FloatBetween(0, Math.PI * 2),
-  };
+  ensureWaterOverlay(ship, scene);
+}
 
-
+function ensureWaterOverlay(ship, scene) {
+  if (ship.waterOverlay && ship.waterOverlay.scene === scene) return ship.waterOverlay;
   ship.waterOverlay = scene.add.graphics().setDepth(SINKING_WATER_OVERLAY_DEPTH);
+  ship.waterOverlay.setVisible(!tacticalDisplayActive);
   worldContainer.add(ship.waterOverlay);
+  return ship.waterOverlay;
 }
 
 function waterlineOffset(seed, normalizedY, time) {
@@ -2127,6 +2115,7 @@ function waterlineOffset(seed, normalizedY, time) {
 
 function redrawWaterOverlay(ship) {
   const { stats, waterOverlay, listSide, waterlineSeed, sinkProgress } = ship;
+  if (!waterOverlay) return;
   const time = ship.sinkElapsed;
   const pixel = SINK_PIXEL;
   const half = pixel / 2;
@@ -2167,41 +2156,27 @@ function redrawWaterOverlay(ship) {
   });
 
 
-  // Add all submerged spans to one compound path and fill it once. The cached
-  // mask still keeps the fill inside the hull, while a single fill operation
-  // prevents alpha seams between neighboring pixel rows.
+  // Build one continuous polygon from the outer hull edge to the waterline.
+  // A small margin beyond the cached hull silhouette closes gaps at the bow,
+  // stern, and far side while keeping this a single generated fill shape.
   waterOverlay.fillStyle(0x06345a, 1);
   waterOverlay.beginPath();
-  rows.forEach(({ localY, edgeX, outerX }) => {
-    const left = Math.min(edgeX, outerX);
-    const right = Math.max(edgeX, outerX);
-    let runStart = null;
-    let runEnd = null;
-    const drawRun = () => {
-      if (runStart === null) return;
-      const runLeft = runStart - half - (listSide === -1 ? SINK_WATER_OVERLAP : 0);
-      const runRight = runEnd + half + (listSide === 1 ? SINK_WATER_OVERLAP : 0);
-      const runTop = localY - half;
-      const runBottom = localY + half;
-      waterOverlay.moveTo(runLeft, runTop);
-      waterOverlay.lineTo(runRight, runTop);
-      waterOverlay.lineTo(runRight, runBottom);
-      waterOverlay.lineTo(runLeft, runBottom);
-      waterOverlay.closePath();
-      runStart = null;
-      runEnd = null;
-    };
-
-    for (let localX = left; localX <= right; localX += pixel) {
-      if (isHullPixelMaskHitAtLocal(stats, localX, localY)) {
-        if (runStart === null) runStart = localX;
-        runEnd = localX;
-      } else {
-        drawRun();
-      }
-    }
-    drawRun();
+  const firstRow = rows[0];
+  const lastRow = rows[rows.length - 1];
+  const outerEdgeX = (row) => row.outerX + listSide * SINK_WATER_MARGIN;
+  const topY = firstRow.localY - half - SINK_WATER_MARGIN;
+  const bottomY = lastRow.localY + half + SINK_WATER_MARGIN;
+  waterOverlay.moveTo(outerEdgeX(firstRow), topY);
+  rows.forEach((row, index) => {
+    const y = index === rows.length - 1 ? bottomY : row.localY;
+    waterOverlay.lineTo(outerEdgeX(row), y);
   });
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    const row = rows[index];
+    const y = index === 0 ? topY : row.localY;
+    waterOverlay.lineTo(row.edgeX, y);
+  }
+  waterOverlay.closePath();
   waterOverlay.fillPath();
 
   // Foam crest along the real waterline
@@ -2220,8 +2195,49 @@ function redrawWaterOverlay(ship) {
 
 // Advances the death sequence
 function updateSinking(ship, dt) {
+  if (ship.deathDriftRemaining > 0) {
+    const elapsedBefore = ship.deathDriftElapsed;
+    const driftDt = Math.min(dt, DEATH_DRIFT_SECONDS - elapsedBefore);
+    const elapsedAfter = elapsedBefore + driftDt;
+    // Linearly ease the ship's saved speed down to zero over the drift.
+    const step = ship.deathDriftSpeed * (
+      driftDt - (elapsedAfter * elapsedAfter - elapsedBefore * elapsedBefore)
+        / (2 * DEATH_DRIFT_SECONDS)
+    );
+    ship.deathDriftElapsed = elapsedAfter;
+    ship.speed = ship.deathDriftSpeed * (1 - elapsedAfter / DEATH_DRIFT_SECONDS);
+    ship.moving = ship.speed > 0;
+    updateShipWake(ship, driftDt);
+    const radius = ship.collisionRadius;
+    const previousX = ship.sprite.x;
+    const previousY = ship.sprite.y;
+    ship.sprite.x = Phaser.Math.Clamp(
+      previousX + Math.cos(ship.deathDriftHeading) * step,
+      radius,
+      MAP_WIDTH - radius,
+    );
+    ship.sprite.y = Phaser.Math.Clamp(
+      previousY + Math.sin(ship.deathDriftHeading) * step,
+      radius,
+      MAP_HEIGHT - radius,
+    );
+    const driftX = ship.sprite.x - previousX;
+    const driftY = ship.sprite.y - previousY;
+    ship.turrets.forEach((turret) => {
+      turret.sprite.x += driftX;
+      turret.sprite.y += driftY;
+    });
+    ship.deathDriftRemaining = Math.max(0, ship.deathDriftRemaining - step);
+    if (elapsedAfter >= DEATH_DRIFT_SECONDS) {
+      ship.deathDriftRemaining = 0;
+      startSinkingAnimation(ship, ship.sprite.scene);
+    }
+    return;
+  }
+
   ship.sinkElapsed += dt;
   ship.sinkProgress = Phaser.Math.Clamp(ship.sinkElapsed / SINK_DURATION, 0, 1);
+  ensureWaterOverlay(ship, ship.sprite.scene);
 
   const now = ship.sprite.scene.time.now;
   if (now - ship.waterOverlayLastUpdate >= 50) {
@@ -2234,6 +2250,8 @@ function updateSinking(ship, dt) {
 
 function finishSinking(ship) {
   ship.sprite.destroy();
+  ship.tacticalSymbol.destroy();
+  ship.tacticalOutlineGlow.destroy();
   ship.wakeSprite.destroy();
   ship.turrets.forEach((turret) => turret.sprite.destroy());
   ship.selectedRing.destroy();
@@ -2241,7 +2259,10 @@ function finishSinking(ship) {
   ship.minRangeCircle.destroy();
   ship.maxRangeCircle.destroy();
   ship.healthBar.destroy();
-  ship.waterOverlay.destroy();
+  if (ship.waterOverlay) {
+    ship.waterOverlay.destroy();
+    ship.waterOverlay = null;
+  }
   if (ship.pathLine) ship.pathLine.destroy();
   if (ship.dispersionEllipse) ship.dispersionEllipse.destroy();
 
@@ -2460,6 +2481,7 @@ function issueMoveOrder(x, y, append) {
     }
     updatePathLine(ship);
   });
+  updateSelectionOverlayVisibility();
 }
 
 function advanceToNextWaypoint(ship) {
@@ -2594,9 +2616,13 @@ const CAMERA_ZOOM_SPEED = 1; // zoom levels per second while held
 
 function updateCameraZoom(camera, keys, dt) {
   if (keys.zoomIn.isDown || keys.zoomInNumpad.isDown) {
-    setCameraZoom(camera, camera.zoom + CAMERA_ZOOM_SPEED * dt);
+    setCameraZoom(camera, tacticalDisplayActive
+      ? camera.zoom * Math.exp(CAMERA_ZOOM_SPEED * dt)
+      : camera.zoom + CAMERA_ZOOM_SPEED * dt);
   } else if (keys.zoomOut.isDown || keys.zoomOutNumpad.isDown) {
-    setCameraZoom(camera, camera.zoom - CAMERA_ZOOM_SPEED * dt);
+    setCameraZoom(camera, tacticalDisplayActive
+      ? camera.zoom * Math.exp(-CAMERA_ZOOM_SPEED * dt)
+      : camera.zoom - CAMERA_ZOOM_SPEED * dt);
   }
 }
 
@@ -2607,6 +2633,55 @@ function setupCameraPanKeys(scene) {
     left: 'A',
     right: 'D',
   });
+}
+
+function focusCameraOnTab(camera) {
+  const selectedFriendly = selectedShips.find((ship) =>
+    ship.team === TEAMS.PLAYER && !ship.sinking && !ship.sunk,
+  );
+
+  if (selectedFriendly) {
+    cameraPanTarget = null;
+    cameraFocusShip = cameraFocusShip === selectedFriendly ? null : selectedFriendly;
+    return;
+  }
+
+  const centerX = camera.scrollX + camera.width / 2;
+  const centerY = camera.scrollY + camera.height / 2;
+  const nearestFriendly = ships
+    .filter((ship) => ship.team === TEAMS.PLAYER && !ship.sinking && !ship.sunk)
+    .sort((a, b) =>
+      Phaser.Math.Distance.Between(centerX, centerY, a.sprite.x, a.sprite.y)
+      - Phaser.Math.Distance.Between(centerX, centerY, b.sprite.x, b.sprite.y)
+    )[0];
+
+  if (!nearestFriendly) return;
+  cameraFocusShip = null;
+  cameraPanTarget = { x: nearestFriendly.sprite.x, y: nearestFriendly.sprite.y };
+}
+
+function updateCameraFocus(camera, dt) {
+  if (cameraFocusShip && (cameraFocusShip.sinking || cameraFocusShip.sunk)) {
+    cameraFocusShip = null;
+  }
+  const target = cameraFocusShip
+    ? { x: cameraFocusShip.sprite.x, y: cameraFocusShip.sprite.y }
+    : cameraPanTarget;
+  if (!target) return;
+
+  const targetScrollX = target.x - camera.width / 2;
+  const targetScrollY = target.y - camera.height / 2;
+  const blend = 1 - Math.exp(-CAMERA_FOCUS_RESPONSE * dt);
+  camera.scrollX += (targetScrollX - camera.scrollX) * blend;
+  camera.scrollY += (targetScrollY - camera.scrollY) * blend;
+
+  if (!cameraFocusShip
+    && Math.abs(targetScrollX - camera.scrollX) < 0.5
+    && Math.abs(targetScrollY - camera.scrollY) < 0.5) {
+    camera.scrollX = targetScrollX;
+    camera.scrollY = targetScrollY;
+    cameraPanTarget = null;
+  }
 }
 
 // Continuous WASD panning
@@ -2620,6 +2695,9 @@ function updateCameraPan(camera, keys, dt) {
 
   if (dx === 0 && dy === 0) return;
 
+  cameraFocusShip = null;
+  cameraPanTarget = null;
+
   // Normalize so diagonal panning isn't faster than cardinal panning
   const length = Math.sqrt(dx * dx + dy * dy);
   dx /= length;
@@ -2631,12 +2709,181 @@ function updateCameraPan(camera, keys, dt) {
 }
 
 function setCameraZoom(camera, zoom) {
-  const nextZoom = Phaser.Math.Clamp(zoom, 0.5, 2.2);
-  camera.zoom = nextZoom;
+  const nextZoom = tacticalDisplayActive
+    ? Phaser.Math.Clamp(zoom, TACTICAL_MIN_ZOOM, TACTICAL_MAX_ZOOM)
+    : Phaser.Math.Clamp(zoom, 0.5, 1.5);
+  camera.setZoom(nextZoom);
   updateWaypointMarkerScales(camera);
   ships.forEach((ship) => {
     if (ship.pathLine) updatePathLine(ship);
   });
+}
+
+function enforceTacticalZoomBounds(camera) {
+  if (!tacticalDisplayActive) return;
+  const boundedZoom = Phaser.Math.Clamp(camera.zoom, TACTICAL_MIN_ZOOM, TACTICAL_MAX_ZOOM);
+  if (camera.zoom === boundedZoom) return;
+  camera.setZoom(boundedZoom);
+  updateWaypointMarkerScales(camera);
+  ships.forEach((ship) => {
+    if (ship.pathLine) updatePathLine(ship, true);
+  });
+}
+
+function createTacticalDisplayUI(scene) {
+  tacticalGrid = scene.add.graphics().setDepth(0.5).setVisible(false);
+  tacticalGrid.lineStyle(2, 0x287b91, 0.5);
+  const gridSpacing = 500;
+  for (let x = 0; x <= MAP_WIDTH; x += gridSpacing) {
+    tacticalGrid.lineBetween(x, 0, x, MAP_HEIGHT);
+  }
+  for (let y = 0; y <= MAP_HEIGHT; y += gridSpacing) {
+    tacticalGrid.lineBetween(0, y, MAP_WIDTH, y);
+  }
+  worldContainer.add(tacticalGrid);
+
+  const frame = scene.add.graphics().setDepth(50);
+  frame.fillStyle(0x0a2534, 1);
+  frame.fillRect(0, 0, config.width, 5);
+  frame.fillRect(0, config.height - 5, config.width, 5);
+  frame.fillRect(0, 0, 5, config.height);
+  frame.fillRect(config.width - 5, 0, 5, config.height);
+
+  const labelBackground = scene.add.rectangle(
+    config.width - 16,
+    16,
+    210,
+    30,
+    0x0a2534,
+    1,
+  ).setOrigin(1, 0).setDepth(51);
+  const label = scene.add.text(config.width - 26, 21, "TACTICAL DISPLAY", {
+    fontFamily: "monospace",
+    fontSize: "16px",
+    color: "#9ef2db",
+    letterSpacing: 1,
+  }).setOrigin(1, 0).setDepth(52);
+  tacticalFrame = [frame, labelBackground, label];
+  scene.cameras.main.ignore(tacticalFrame);
+  tacticalFrame.forEach((element) => element.setVisible(false));
+}
+
+function setTacticalDisplay(scene, active) {
+  if (tacticalDisplayActive === active) return;
+  const camera = scene.cameras.main;
+  if (active) {
+    tacticalSavedCamera = {
+      scrollX: camera.scrollX,
+      scrollY: camera.scrollY,
+      zoom: camera.zoom,
+    };
+    const centerX = camera.scrollX + camera.width / 2;
+    const centerY = camera.scrollY + camera.height / 2;
+    tacticalDisplayActive = true;
+    setCameraZoom(camera, 0.1);
+    camera.scrollX = centerX - camera.width / 2;
+    camera.scrollY = centerY - camera.height / 2;
+    ships.forEach((ship) => {
+      if (ship.pathLine) updatePathLine(ship, true);
+    });
+    oceanBackground.setFillStyle(0x071b2b, 1);
+    tacticalGrid.setVisible(true);
+    tacticalHiddenEffects.forEach((effect) => effect.setVisible(false));
+    oceanWaves.forEach(({ sprite }) => sprite.setVisible(false));
+    activeWakes.forEach(({ graphics }) => graphics.setVisible(false));
+    ships.forEach((ship) => {
+      ship.sprite.setVisible(false);
+      ship.wakeSprite.setVisible(false);
+      ship.turrets.forEach(({ sprite }) => sprite.setVisible(false));
+      ship.selectedRing.setVisible(false);
+      ship.hostileRing.setVisible(false);
+      ship.minRangeCircle.setVisible(false);
+      ship.maxRangeCircle.setVisible(false);
+      ship.healthBar.setVisible(false);
+      if (ship.dispersionEllipse) ship.dispersionEllipse.setVisible(false);
+      if (ship.waterOverlay) ship.waterOverlay.setVisible(false);
+    });
+    tacticalFrame.forEach((element) => element.setVisible(true));
+  } else {
+    tacticalDisplayActive = false;
+    oceanBackground.setFillStyle(0x06345a, 1);
+    tacticalGrid.setVisible(false);
+    tacticalHiddenEffects.forEach((effect) => effect.setVisible(true));
+    oceanWaves.forEach(({ sprite }) => sprite.setVisible(true));
+    activeWakes.forEach(({ graphics }) => graphics.setVisible(true));
+    ships.forEach((ship) => {
+      ship.tacticalSymbol.setVisible(false);
+      ship.sprite.setVisible(true);
+      ship.turrets.forEach(({ sprite }) => sprite.setVisible(true));
+      ship.hostileRing.setVisible(ship.hostile);
+      ship.selectedRing.setVisible(selectedShips.includes(ship));
+      if (!ship.sinking) restoreShipVisual(ship);
+      if (ship.waterOverlay) ship.waterOverlay.setVisible(true);
+      ship.minRangeCircle.setVisible(
+        firingModeActive && ship.team === TEAMS.PLAYER && selectedShips.includes(ship),
+      );
+      ship.maxRangeCircle.setVisible(
+        firingModeActive && ship.team === TEAMS.PLAYER && selectedShips.includes(ship),
+      );
+      if (ship.dispersionEllipse) ship.dispersionEllipse.setVisible(selectedShips.includes(ship));
+    });
+    tacticalFrame.forEach((element) => element.setVisible(false));
+    if (tacticalSavedCamera) {
+      camera.zoom = tacticalSavedCamera.zoom;
+      camera.scrollX = tacticalSavedCamera.scrollX;
+      camera.scrollY = tacticalSavedCamera.scrollY;
+      updateWaypointMarkerScales(camera);
+      ships.forEach((ship) => {
+        if (ship.pathLine) updatePathLine(ship, true);
+      });
+    }
+    tacticalSavedCamera = null;
+  }
+  updateTacticalSymbols(camera);
+  updateSelectionOverlayVisibility();
+}
+
+function updateTacticalSymbols(camera) {
+  ships.forEach((ship) => {
+    const symbol = ship.tacticalSymbol;
+    if (!symbol) return;
+    const visible = tacticalDisplayActive
+      && !ship.sunk
+      && (ship.team === TEAMS.PLAYER || ship.identified);
+    symbol.setVisible(visible);
+    if (!visible) {
+      ship.tacticalOutlineGlow?.setVisible(false);
+      return;
+    }
+
+    symbol.setPosition(ship.sprite.x, ship.sprite.y);
+    symbol.setRotation(ship.sprite.rotation);
+    const iconSize = getTacticalSymbolScreenSize(camera.zoom);
+    symbol.setDisplaySize(iconSize.width / camera.zoom, iconSize.height / camera.zoom);
+    symbol.setTint(selectedShips.includes(ship)
+      ? 0xffe778
+      : ship.team === TEAMS.PLAYER ? 0x62f0c8 : 0xff625f);
+
+    const glow = ship.tacticalOutlineGlow;
+    const isSelected = selectedShips.includes(ship);
+    glow.setVisible(isSelected);
+    if (isSelected) {
+      glow.setPosition(ship.sprite.x, ship.sprite.y);
+      glow.setRotation(ship.sprite.rotation);
+      glow.setDisplaySize(
+        TACTICAL_OUTLINE_WIDTH / camera.zoom,
+        TACTICAL_OUTLINE_HEIGHT / camera.zoom,
+      );
+      glow.setAlpha(0.78 + Math.sin(ship.sprite.scene.time.now * 0.006) * 0.16);
+    }
+  });
+}
+
+function getTacticalSymbolScreenSize() {
+  return {
+    width: TACTICAL_SYMBOL_WIDTH,
+    height: TACTICAL_SYMBOL_HEIGHT,
+  };
 }
 
 // The hull is a single static image; only the wake sprite animates.
@@ -2688,7 +2935,7 @@ function restoreShipVisual(ship) {
     return;
   }
 
-  ship.wakeSprite.setVisible(true);
+  ship.wakeSprite.setVisible(!tacticalDisplayActive);
   ship.wakeSprite.setTexture(wake.wakeKey, wake.wakeFrame);
   ship.wakeSprite.setDisplaySize(stats.displayWidth, stats.displayHeight);
   ship.wakeSprite.anims.timeScale = ship.slowingDown
@@ -2708,7 +2955,7 @@ function syncShipAnimationFrame(ship) {
     return;
   }
 
-  ship.wakeSprite.setVisible(true);
+  ship.wakeSprite.setVisible(!tacticalDisplayActive);
   ship.wakeSprite.setTexture(wake.wakeKey, wake.wakeFrame);
   ship.wakeSprite.setDisplaySize(ship.stats.displayWidth, ship.stats.displayHeight);
 }
@@ -3022,7 +3269,7 @@ function startAccelerationAnimation(ship) {
   });
 }
 
-function updatePathLine(ship) {
+function updatePathLine(ship, forceRedraw = false) {
   if (!ship.pathLine || !ship.target) return;
   const scene = ship.sprite.scene;
   const zoom = scene.cameras.main.zoom;
@@ -3050,11 +3297,10 @@ function updatePathLine(ship) {
     ship.pathPreviewCurrentAvoidance = avoidance;
   }
 
-  const routeChanged = ship.pathPreviewDirty || !ship.pathPreviewPoints;
-  const lastDrawPosition = ship.pathPreviewLastDrawPosition;
-  const movedSinceDraw = !lastDrawPosition
-    || Phaser.Math.Distance.Between(ship.sprite.x, ship.sprite.y, lastDrawPosition.x, lastDrawPosition.y) >= 12;
-  if (!routeChanged && !movedSinceDraw) return;
+  const pathRecalculationDue = scene.time.now - ship.pathPreviewLastRedrawAt >= 250;
+  const routeChanged = ship.pathPreviewDirty || !ship.pathPreviewPoints || pathRecalculationDue;
+  if (!forceRedraw && !routeChanged
+    && scene.time.now - ship.pathPreviewLastRedrawAt < 250) return;
 
   if (routeChanged) {
     ship.pathPreviewStart = { x: ship.sprite.x, y: ship.sprite.y };
@@ -3096,21 +3342,28 @@ function updatePathLine(ship) {
     ship.pathLine.lineTo(lastPoint.x, lastPoint.y);
   }
   ship.pathLine.strokePath();
+  ship.pathPreviewLastRedrawAt = scene.time.now;
 }
 
 function updateSelectionOverlayVisibility() {
   ships.forEach((ship) => {
     if (ship.pathLine) {
-      ship.pathLine.setVisible(selectedShips.includes(ship) && Boolean(ship.target));
+      const visibleInCurrentView = tacticalDisplayActive
+        ? ship.team === TEAMS.PLAYER
+        : selectedShips.includes(ship);
+      ship.pathLine.setVisible(visibleInCurrentView && Boolean(ship.target));
     }
   });
 
   waypointMarkers.forEach((marker) => {
     const waypoint = marker.waypoint;
-    const belongsToSelectedShip = waypoint && selectedShips.some((ship) => (
-      ship.target === waypoint || ship.waypoints.includes(waypoint)
+    const belongsToVisibleShip = waypoint && ships.some((ship) => (
+      (tacticalDisplayActive
+        ? ship.team === TEAMS.PLAYER
+        : selectedShips.includes(ship))
+      && (ship.target === waypoint || ship.waypoints.includes(waypoint))
     ));
-    marker.setVisible(Boolean(belongsToSelectedShip));
+    marker.setVisible(Boolean(belongsToVisibleShip));
   });
 }
 
@@ -3259,7 +3512,7 @@ function drawFiringArcDebug(scene) {
   clearFiringArcDebug();
 
   selectedShips.forEach((ship) => {
-    if (ship.sinking) return;
+    if (ship.team !== TEAMS.PLAYER || ship.sinking || ship.sunk) return;
     const radius = 400;
 
     ship.turrets.forEach((turret) => {
