@@ -42,6 +42,13 @@ const config = {
   },
 };
 
+const CURRENT_LEVEL = window.LEVEL_DATA?.levels?.find(
+  (level) => level.id === window.LEVEL_DATA.currentLevelId,
+);
+if (!CURRENT_LEVEL) {
+  throw new Error("Level data is missing or currentLevelId does not match a level.");
+}
+
 new Phaser.Game(config);
 
 let ships = [];
@@ -69,7 +76,7 @@ const TACTICAL_SYMBOL_HEIGHT = 82.5;
 // the outline mask is 270x750 in a 480x750 image.
 const TACTICAL_OUTLINE_WIDTH = (TACTICAL_SYMBOL_WIDTH * (240 / 480) + 2) * (480 / 270);
 const TACTICAL_OUTLINE_HEIGHT = TACTICAL_SYMBOL_HEIGHT + 2;
-const TACTICAL_MIN_ZOOM = 0.049;
+const TACTICAL_MIN_ZOOM = 0.05;
 const TACTICAL_MAX_ZOOM = 0.5;
 const TACTICAL_SYMBOL_TEXTURES = ["tactical-bb", "tactical-ca", "tactical-cl", "tactical-dd"];
 const waypointSize = 48;
@@ -389,15 +396,22 @@ function createShipContextMenu(scene) {
       closeShipContextMenu();
     });
   const optionLabel = PixelFont.create(scene, defaultLabel, {
-    x: padding + 6, y: padding + 5, pixelSize, color: 0xffffff, depth: 32,
+    x: padding + optionWidth / 2,
+    y: padding + (optionHeight - labelHeight) / 2,
+    pixelSize,
+    color: 0xffffff,
+    depth: 32,
+    align: "center",
   }).setVisible(false);
   scene.cameras.main.ignore([panel, option, optionLabel]);
-  shipContextMenu = { scene, panel, option, optionLabel, ship: null, padding };
+  shipContextMenu = {
+    scene, panel, option, optionLabel, ship: null, padding, optionWidth, optionHeight, labelHeight,
+  };
 }
 
 function openShipContextMenu(ship, screenX, screenY) {
   if (!shipContextMenu) return;
-  const { panel, option, optionLabel, padding } = shipContextMenu;
+  const { panel, option, optionLabel, padding, optionWidth, optionHeight, labelHeight } = shipContextMenu;
   optionLabel.setPixelText(ship.hostile ? "REMOVE HOSTILE MARKING" : "IDENTIFY AS HOSTILE");
   const clickOffset = 8;
   const x = Phaser.Math.Clamp(screenX + clickOffset, 0, config.width - panel.displayWidth);
@@ -405,7 +419,10 @@ function openShipContextMenu(ship, screenX, screenY) {
   shipContextMenu.ship = ship;
   panel.setPosition(x, y).setVisible(true);
   option.setPosition(x + padding, y + padding).setVisible(true);
-  optionLabel.setPixelPosition(x + padding + 6, y + padding + 5).setVisible(true);
+  optionLabel.setPixelPosition(
+    x + padding + optionWidth / 2,
+    y + padding + (optionHeight - labelHeight) / 2,
+  ).setVisible(true);
 }
 
 function closeShipContextMenu() {
@@ -467,10 +484,15 @@ function create() {
     } else {
       setCameraZoom(camera, camera.zoom - deltaY * 0.001);
     }
-    if (!maintainingFocus) {
+    const tacticalMapFitLimit = tacticalDisplayActive
+      && camera.zoom <= TACTICAL_MIN_ZOOM;
+    if (!maintainingFocus && !tacticalMapFitLimit) {
       const zoom = camera.zoom;
       camera.scrollX += cursorOffsetX * (1 / previousZoom - 1 / zoom);
       camera.scrollY += cursorOffsetY * (1 / previousZoom - 1 / zoom);
+    }
+    if (tacticalMapFitLimit && !maintainingFocus) {
+      camera.centerOn(MAP_WIDTH / 2, MAP_HEIGHT / 2);
     }
   });
 
@@ -530,10 +552,22 @@ function create() {
     buildHullRowProfile(this, stats);
   });
 
-  // Create a small starting fleet
-  ships = [createShip(this, MAP_WIDTH / 2, MAP_HEIGHT / 2, "pennsylvania", TEAMS.PLAYER, Math.PI / 2),
-          createShip(this, MAP_WIDTH / 2 - 800, MAP_HEIGHT / 2, "new-orleans", TEAMS.PLAYER, Math.PI / 2),
-          createShip(this, MAP_WIDTH / 2 - 5400, MAP_HEIGHT / 2 + 1000, "new-orleans", TEAMS.ENEMY, Math.PI / 4 * 3)];
+  // Level ship placement and future AI settings come from editable level data.
+  ships = CURRENT_LEVEL.ships.map((definition) => {
+    const ship = createShip(
+      this,
+      definition.position.x,
+      definition.position.y,
+      definition.shipType,
+      definition.team,
+      Phaser.Math.DegToRad(definition.headingDegrees ?? 0),
+    );
+    ship.levelShipId = definition.id;
+    ship.aiSettings = definition.ai
+      ? { ...definition.ai, parameters: { ...(definition.ai.parameters || {}) } }
+      : null;
+    return ship;
+  });
 
   this.anims.create({
     key: "ocean-wave",
@@ -1287,15 +1321,26 @@ function syncFireTarget(ship) {
   const targetShip = ship.fireTarget && ship.fireTarget.targetShip;
   if (!targetShip) return;
   if (targetShip.sinking || targetShip.sunk) {
-    ship.fireTarget = null;
-    if (ship.dispersionEllipse) {
-      ship.dispersionEllipse.destroy();
-      ship.dispersionEllipse = null;
-    }
+    clearShipFireTarget(ship);
+    return;
+  }
+  const distance = Phaser.Math.Distance.Between(
+    ship.sprite.x, ship.sprite.y, targetShip.sprite.x, targetShip.sprite.y,
+  );
+  if (distance < ship.stats.minFiringDistance || distance > ship.stats.maxFiringDistance) {
+    clearShipFireTarget(ship);
     return;
   }
   ship.fireTarget.x = targetShip.sprite.x;
   ship.fireTarget.y = targetShip.sprite.y;
+}
+
+function clearShipFireTarget(ship) {
+  ship.fireTarget = null;
+  if (ship.dispersionEllipse) {
+    ship.dispersionEllipse.destroy();
+    ship.dispersionEllipse = null;
+  }
 }
 
 function updateFiring(ship, dt) {
@@ -1938,25 +1983,39 @@ function spawnWake(ship) {
   const speedFraction = Phaser.Math.Clamp(ship.speed / ship.maxSpeed, 0, 1);
   const size = Phaser.Math.Linear(6, 16, speedFraction) * widthScale;
 
-  const graphics = drawWakeGraphics(scene, size, widthScale);
-  graphics.setPosition(x, y);
-  graphics.setRotation(ship.sprite.rotation + Phaser.Math.FloatBetween(-0.15, 0.15));
-  graphics.setDepth(1.2);
-  worldContainer.add(graphics);
-
   const wakeDriftAngle = ship.sprite.rotation + Math.PI / 2
     + Phaser.Math.FloatBetween(-0.45, 0.45);
   const wakeDriftSpeed = Phaser.Math.FloatBetween(1, 2) * widthScale;
 
-  activeWakes.push({
-    graphics,
+  const wake = {
+    scene,
+    graphics: null,
+    x,
+    y,
+    rotation: ship.sprite.rotation + Phaser.Math.FloatBetween(-0.15, 0.15),
+    size,
+    widthScale,
     age: 0,
     maxAlpha: Phaser.Math.Linear(0.25, 0.6, speedFraction),
     driftX: Math.cos(wakeDriftAngle) * wakeDriftSpeed,
     driftY: Math.sin(wakeDriftAngle) * wakeDriftSpeed,
-  });
-  graphics.setVisible(!tacticalDisplayActive
-    && isWithinOceanEffectRange(x, y, scene.cameras.main));
+  };
+  activeWakes.push(wake);
+  if (!tacticalDisplayActive
+    && isWithinOceanEffectRange(x, y, scene.cameras.main)) materializeWake(wake);
+}
+
+function materializeWake(wake) {
+  if (wake.graphics) return;
+  const t = wake.age / WAKE_LIFETIME;
+  const graphics = drawWakeGraphics(wake.scene, wake.size, wake.widthScale);
+  graphics.setPosition(wake.x, wake.y)
+    .setRotation(wake.rotation)
+    .setDepth(1.2)
+    .setAlpha(wake.maxAlpha * (1 - t))
+    .setScale(1 + t * 0.6);
+  worldContainer.add(graphics);
+  wake.graphics = graphics;
 }
 
 function updateShipWake(ship, dt) {
@@ -1972,9 +2031,7 @@ function updateShipWake(ship, dt) {
 
   if (ship.wakeDistanceAccum >= spacing) {
     ship.wakeDistanceAccum = 0;
-    const shouldGenerateWake = ship.team === TEAMS.ENEMY
-      || isWithinOceanEffectRange(ship.sprite.x, ship.sprite.y, ship.sprite.scene.cameras.main);
-    if (!tacticalDisplayActive && shouldGenerateWake) {
+    if (!tacticalDisplayActive) {
       spawnWake(ship);
     }
   }
@@ -1987,22 +2044,26 @@ function updateWakes(dt) {
     const t = wake.age / WAKE_LIFETIME;
 
     if (t >= 1) {
-      wake.graphics.destroy();
+      wake.graphics?.destroy();
       activeWakes.splice(i, 1);
       continue;
     }
 
-    const camera = wake.graphics.scene.cameras.main;
+    wake.x += wake.driftX * dt;
+    wake.y += wake.driftY * dt;
+    const camera = wake.scene.cameras.main;
     const nearCamera = !tacticalDisplayActive
-      && isWithinOceanEffectRange(wake.graphics.x, wake.graphics.y, camera);
-    wake.graphics.setVisible(nearCamera);
-    if (!nearCamera) continue;
+      && isWithinOceanEffectRange(wake.x, wake.y, camera);
+    if (!nearCamera) {
+      wake.graphics?.setVisible(false);
+      continue;
+    }
 
-    // Drift back and outward from the stern while fading and expanding.
-    wake.graphics.x += wake.driftX * dt;
-    wake.graphics.y += wake.driftY * dt;
-    wake.graphics.setAlpha(wake.maxAlpha * (1 - t));
-    wake.graphics.setScale(1 + t * 0.6);
+    if (!wake.graphics) materializeWake(wake);
+    wake.graphics.setVisible(true)
+      .setPosition(wake.x, wake.y)
+      .setAlpha(wake.maxAlpha * (1 - t))
+      .setScale(1 + t * 0.6);
   }
 }
 
@@ -2876,6 +2937,10 @@ function setCameraZoom(camera, zoom) {
     ? Phaser.Math.Clamp(zoom, TACTICAL_MIN_ZOOM, TACTICAL_MAX_ZOOM)
     : Phaser.Math.Clamp(zoom, 0.5, 1.5);
   camera.setZoom(nextZoom);
+  if (tacticalDisplayActive && nextZoom === TACTICAL_MIN_ZOOM
+    && !cameraFocusShip && !cameraPanTarget) {
+    camera.centerOn(MAP_WIDTH / 2, MAP_HEIGHT / 2);
+  }
   updateWaypointMarkerScales(camera);
   ships.forEach((ship) => {
     if (ship.pathLine) updatePathLine(ship);
@@ -2887,6 +2952,9 @@ function enforceTacticalZoomBounds(camera) {
   const boundedZoom = Phaser.Math.Clamp(camera.zoom, TACTICAL_MIN_ZOOM, TACTICAL_MAX_ZOOM);
   if (camera.zoom === boundedZoom) return;
   camera.setZoom(boundedZoom);
+  if (boundedZoom === TACTICAL_MIN_ZOOM && !cameraFocusShip && !cameraPanTarget) {
+    camera.centerOn(MAP_WIDTH / 2, MAP_HEIGHT / 2);
+  }
   updateWaypointMarkerScales(camera);
   ships.forEach((ship) => {
     if (ship.pathLine) updatePathLine(ship, true);
@@ -2950,7 +3018,7 @@ function setTacticalDisplay(scene, active) {
     tacticalGrid.setVisible(true);
     tacticalHiddenEffects.forEach((effect) => effect.setVisible(false));
     oceanWaves.forEach(({ sprite }) => sprite.setVisible(false));
-    activeWakes.forEach(({ graphics }) => graphics.setVisible(false));
+    activeWakes.forEach(({ graphics }) => graphics?.setVisible(false));
     ships.forEach((ship) => {
       ship.sprite.setVisible(false);
       ship.wakeSprite.setVisible(false);
@@ -2971,9 +3039,11 @@ function setTacticalDisplay(scene, active) {
     tacticalHiddenEffects.forEach((effect) => effect.setVisible(true));
     streamOceanWaves(camera, scene);
     oceanWaves.forEach(({ sprite }) => sprite.setVisible(true));
-    activeWakes.forEach(({ graphics }) => graphics.setVisible(
-      isWithinOceanEffectRange(graphics.x, graphics.y, camera),
-    ));
+    activeWakes.forEach(({ graphics }) => {
+      if (graphics) {
+        graphics.setVisible(isWithinOceanEffectRange(graphics.x, graphics.y, camera));
+      }
+    });
     ships.forEach((ship) => {
       ship.tacticalSymbol.setVisible(false);
       ship.sprite.setVisible(true);

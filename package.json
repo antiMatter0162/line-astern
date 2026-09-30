@@ -20,6 +20,8 @@
       "enemy-ai.js",
       "pixel-font.js",
       "start-screen.js",
+      "level-template.js",
+      "campaign/**/*",
       "main.js",
       "ship-types.js",
       "assets/**/*"
