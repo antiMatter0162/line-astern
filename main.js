@@ -42,7 +42,7 @@ const config = {
   },
 };
 
-const CURRENT_LEVEL = window.LEVEL_DATA?.levels?.find(
+let CURRENT_LEVEL = window.LEVEL_DATA?.levels?.find(
   (level) => level.id === window.LEVEL_DATA.currentLevelId,
 );
 if (!CURRENT_LEVEL) {
@@ -277,8 +277,72 @@ let pauseOverlayElements = null;
 let startScreenActive = true;
 let startScreenMenu = null;
 
-function startGame() {
+function spawnLevelShips(scene, level) {
+  return level.ships.map((definition) => {
+    const ship = createShip(
+      scene,
+      definition.position.x,
+      definition.position.y,
+      definition.shipType,
+      definition.team,
+      Phaser.Math.DegToRad(definition.headingDegrees ?? 0),
+    );
+    ship.levelShipId = definition.id;
+    ship.aiSettings = definition.ai
+      ? { ...definition.ai, parameters: { ...(definition.ai.parameters || {}) } }
+      : null;
+    return ship;
+  });
+}
+
+// Tears down everything belonging to the current level so a new one starts clean.
+function clearLevel(scene) {
+  if (tacticalDisplayActive) setTacticalDisplay(scene, false);
+  clearFiringArcDebug();
+  firingArcDebugActive = false;
+
+  ships.forEach((ship) => {
+    if (ship.target) removeWaypointMarker(ship.target);
+    ship.waypoints.forEach(removeWaypointMarker);
+    finishSinking(ship); // destroys every sprite/graphic the ship owns
+  });
+  ships = [];
+  selectedShips = [];
+
+  activeShells.forEach((shell) => {
+    shell.sprite.setVisible(false);
+    shellSpritePool.push(shell.sprite);
+  });
+  activeShells = [];
+
+  activeWakes.forEach((wake) => wake.graphics?.destroy());
+  activeWakes = [];
+
+  attachedHitExplosions.clear();
+  [...tacticalHiddenEffects].forEach(destroyTacticalHiddenEffect);
+
+  [...waypointMarkers].forEach((marker) => marker.destroy());
+  waypointMarkers = [];
+
+  cameraFocusShip = null;
+  cameraPanTarget = null;
+  setFiringMode(false);
+  updateSpeedHud();
+}
+
+function loadLevel(scene, levelId) {
+  const level = window.LEVEL_DATA.levels.find((l) => l.id === levelId);
+  if (!level) return;
+  clearLevel(scene);
+  window.LEVEL_DATA.currentLevelId = levelId;
+  CURRENT_LEVEL = level;
+  ships = spawnLevelShips(scene, level);
+  scene.cameras.main.centerOn(MAP_WIDTH / 2, MAP_HEIGHT / 2);
+}
+
+function startGame(levelId) {
   if (!startScreenActive) return;
+  loadLevel(pauseOverlayElements.scene, levelId);
   suppressGameplayPointer = true;
   startScreenActive = false;
   startScreenMenu.hide();
@@ -553,21 +617,7 @@ function create() {
   });
 
   // Level ship placement and future AI settings come from editable level data.
-  ships = CURRENT_LEVEL.ships.map((definition) => {
-    const ship = createShip(
-      this,
-      definition.position.x,
-      definition.position.y,
-      definition.shipType,
-      definition.team,
-      Phaser.Math.DegToRad(definition.headingDegrees ?? 0),
-    );
-    ship.levelShipId = definition.id;
-    ship.aiSettings = definition.ai
-      ? { ...definition.ai, parameters: { ...(definition.ai.parameters || {}) } }
-      : null;
-    return ship;
-  });
+  ships = spawnLevelShips(this, CURRENT_LEVEL);
 
   this.anims.create({
     key: "ocean-wave",
@@ -617,7 +667,7 @@ function create() {
   });
   this.input.keyboard.on("keydown-F", () => { if (!gamePaused) toggleFiringMode(); });
   this.input.keyboard.on("keydown-X", () => { if (!gamePaused) stopFiring(); });
-  this.input.keyboard.on("keydown-S", () => { if (!gamePaused) stopSelectedShips(); });
+  this.input.keyboard.on("keydown-SPACE", () => { if (!gamePaused) stopSelectedShips(); });
   //this.input.keyboard.on("keydown-PERIOD", killSelectedShips); // debug: force-sink selected ships
   this.input.keyboard.on("keydown", (event) => {
     if (gamePaused || event.code !== "AltLeft" || firingArcDebugActive) return;

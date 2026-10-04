@@ -40,6 +40,16 @@ window.createEnemyAI = function createEnemyAI(deps) {
     return shipStates.get(ship);
   }
 
+  // Reads the per-level battleshipAvoidanceDistance from the ship's AI settings.
+  // null/missing falls back to the built-in defaults (2150 trigger, 2250 goal).
+  function getAvoidanceDistances(ship) {
+    const configured = ship.aiSettings?.parameters?.battleshipAvoidanceDistance;
+    if (configured == null) {
+      return { goal: BATTLESHIP_AVOIDANCE_GOAL, trigger: BATTLESHIP_AVOIDANCE_TRIGGER };
+    }
+    return { goal: configured, trigger: configured - 100 };
+  }
+
   function update(scene, dt) {
     decisionClock += dt;
     if (decisionClock < DECISION_INTERVAL) return;
@@ -75,7 +85,7 @@ window.createEnemyAI = function createEnemyAI(deps) {
         }))
         .sort((a, b) => a.distance - b.distance)[0];
       const shouldAvoidBattleship = nearestBattleship
-        && (nearestBattleship.distance < BATTLESHIP_AVOIDANCE_TRIGGER || !nearestPlayer);
+        && (nearestBattleship.distance < getAvoidanceDistances(enemy).trigger || !nearestPlayer);
 
       if (!nearestPlayer && !shouldAvoidBattleship) {
         clearEnemyAiTarget(enemy);
@@ -173,6 +183,7 @@ window.createEnemyAI = function createEnemyAI(deps) {
   }
 
   function getBattleshipRetreatDestination(ship, battleships) {
+    const goal = getAvoidanceDistances(ship).goal;
     const nearest = battleships.reduce((closest, candidate) => {
       const distance = Phaser.Math.Distance.Between(
         ship.sprite.x, ship.sprite.y, candidate.sprite.x, candidate.sprite.y,
@@ -188,11 +199,11 @@ window.createEnemyAI = function createEnemyAI(deps) {
       : ship.sprite.rotation - Math.PI / 2;
     return {
       x: Phaser.Math.Clamp(
-        nearest.ship.sprite.x + Math.cos(angle) * BATTLESHIP_AVOIDANCE_GOAL,
+        nearest.ship.sprite.x + Math.cos(angle) * goal,
         0, mapWidth,
       ),
       y: Phaser.Math.Clamp(
-        nearest.ship.sprite.y + Math.sin(angle) * BATTLESHIP_AVOIDANCE_GOAL,
+        nearest.ship.sprite.y + Math.sin(angle) * goal,
         0, mapHeight,
       ),
     };

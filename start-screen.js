@@ -1,5 +1,6 @@
 // Launch menu renderer with separate main-menu and campaign pages.
 window.createStartScreen = function createStartScreen(scene, onSelectMode, onExitGame) {
+  console.log("levels:", window.LEVEL_DATA.levels.map((l) => l.id));
   const width = 1280;
   const height = 800;
   const leftWidth = 430;
@@ -78,8 +79,9 @@ window.createStartScreen = function createStartScreen(scene, onSelectMode, onExi
 
   const levelRows = Array.from({ length: 5 }, (_, index) => {
     const levelNumber = index + 1;
+    const levelId = `1-${levelNumber}`;                                   // NEW
     const y = 434 + index * 30;
-    const enabled = levelNumber === 1;
+    const enabled = window.LEVEL_DATA.levels.some((l) => l.id === levelId); // CHANGED
     const button = scene.add.rectangle(
       menuCenterX + 10,
       y + 14,
@@ -91,9 +93,9 @@ window.createStartScreen = function createStartScreen(scene, onSelectMode, onExi
       button.setInteractive({ useHandCursor: true })
         .on("pointerover", () => button.setFillStyle(0x187568))
         .on("pointerout", () => button.setFillStyle(0x12584f))
-        .on("pointerdown", () => onSelectMode("1-1"));
+        .on("pointerdown", () => onSelectMode(levelId));                  // CHANGED
     }
-    const label = window.PixelFont.create(scene, `LEVEL 1-${levelNumber}`, {
+    const label = window.PixelFont.create(scene, `LEVEL ${levelId}`, {    // CHANGED (optional, same output)
       x: menuCenterX + 10,
       y: y + 7,
       pixelSize: 2,

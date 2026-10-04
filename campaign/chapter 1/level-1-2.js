@@ -1,8 +1,8 @@
-window.CHAPTER_1_LEVELS = [
+window.CHAPTER_1_LEVELS.push(
   {
-    id: "1-1",
-    name: "Open Water Skirmish",
-    description: "An enemy cruiser has been caught out of position. Now is the perfect opportunity to strike.",
+    id: "1-2",
+    name: "Battleship Encounter",
+    description: "A battleship is steaming toward your location. Engage and destroy it.",
 
     ships: [
       {
@@ -10,30 +10,31 @@ window.CHAPTER_1_LEVELS = [
         team: "player",
         shipType: "pennsylvania",
         position: { x: 12800, y: 8000 },
-        headingDegrees: 90,
+        headingDegrees: 270,
       },
       {
         id: "player-cruiser-1",
         team: "player",
         shipType: "new-orleans",
         position: { x: 12000, y: 8000 },
-        headingDegrees: 90,
+        headingDegrees: 270,
       },
       {
-        id: "enemy-cruiser-1",
+        id: "enemy-battleship-1",
         team: "enemy",
-        shipType: "new-orleans",
-        position: { x: 7400, y: 9000 },
-        headingDegrees: 135,
+        shipType: "pennsylvania",
+        position: { x: 3000, y: 9000 },
+        headingDegrees: 45,
         ai: {
           profile: "default",
           parameters: {
             aggression: 1,
             preferredRange: null,
-            battleshipAvoidanceDistance: 2250,
+            battleshipAvoidanceDistance: null,
           },
         },
       },
+      
     ],
 
     // Declarative objectives are included for the future level evaluator.
@@ -47,4 +48,4 @@ window.CHAPTER_1_LEVELS = [
       conditions: [{ type: "all-friendly-ships-lost" }],
     },
   },
-];
+);
