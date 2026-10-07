@@ -213,6 +213,7 @@ const enemyAI = window.createEnemyAI({
   removeWaypointMarker,
   createFireTarget,
   refreshShipDispersionEllipse,
+  clearShipFireTarget,
 });
 let speedHudButtons = null;
 let speedHudLabels = null;
@@ -589,24 +590,26 @@ function create() {
       frameRate: WAKE_FPS,
       repeat: 0,
     });
-     this.anims.create({
-      key: "explosion",
-      frames: this.anims.generateFrameNumbers("explosion", { start: 0, end: 11 }),
-      frameRate: 12,
-      repeat: 0,
-    });
-    this.anims.create({
-      key: "splash",
-      frames: this.anims.generateFrameNumbers("splash", { start: 0, end: 8 }),
-      frameRate: 12,
-      repeat: 0,
-    });
-    this.anims.create({
-      key: "hit-explosion",
-      frames: this.anims.generateFrameNumbers("hit-explosion", { start: 0, end: 9 }),
-      frameRate: 12,
-      repeat: 0,
-    });
+  });
+
+  // Combat effects are shared, so register them once rather than per ship type.
+  this.anims.create({
+    key: "explosion",
+    frames: this.anims.generateFrameNumbers("explosion", { start: 0, end: 11 }),
+    frameRate: 12,
+    repeat: 0,
+  });
+  this.anims.create({
+    key: "splash",
+    frames: this.anims.generateFrameNumbers("splash", { start: 0, end: 8 }),
+    frameRate: 12,
+    repeat: 0,
+  });
+  this.anims.create({
+    key: "hit-explosion",
+    frames: this.anims.generateFrameNumbers("hit-explosion", { start: 0, end: 9 }),
+    frameRate: 12,
+    repeat: 0,
   });
 
   // Precompute each ship type's real hull-row edge profile (bow-to-stern
@@ -616,7 +619,7 @@ function create() {
     buildHullRowProfile(this, stats);
   });
 
-  // Level ship placement and future AI settings come from editable level data.
+  // Level ship placement and per-ship AI overrides come from editable level data.
   ships = spawnLevelShips(this, CURRENT_LEVEL);
 
   this.anims.create({
@@ -1149,7 +1152,7 @@ function createShip(scene, x, y, typeId, team = TEAMS.PLAYER, initialRotation = 
   };
 }
 
-// Builds the four turret sprites for a ship, anchored per stats.turretMounts.
+// Builds each ship's turret sprites, anchored per stats.turretMounts.
 // Each turret tracks its own local offset and a fixed base rotation
 function createTurrets(scene, shipX, shipY, stats) {
   return stats.turretMounts.map((mount) => {
@@ -1320,13 +1323,7 @@ function stopFiring() {
   const commandableShips = getCommandableShips();
   if (commandableShips.length === 0) return;
 
-  commandableShips.forEach((ship) => {
-    ship.fireTarget = null;
-    if (ship.dispersionEllipse) {
-      ship.dispersionEllipse.destroy();
-      ship.dispersionEllipse = null;
-    }
-  });
+  commandableShips.forEach(clearShipFireTarget);
 }
 
 function issueFireOrder(x, y) {
@@ -1355,11 +1352,7 @@ function issueFireOrder(x, y) {
       ? ship.fireTarget.targetShip === targetShip
       : !ship.fireTarget.targetShip && Phaser.Math.Distance.Between(ship.fireTarget.x, ship.fireTarget.y, targetX, targetY) <= FIRE_TARGET_TOGGLE_RADIUS);
     if (sameTarget) {
-      ship.fireTarget = null;
-      if (ship.dispersionEllipse) {
-        ship.dispersionEllipse.destroy();
-        ship.dispersionEllipse = null;
-      }
+      clearShipFireTarget(ship);
     } else {
       ship.fireTarget = createFireTarget(targetX, targetY, targetShip);
       refreshShipDispersionEllipse(ship);

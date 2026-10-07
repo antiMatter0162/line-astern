@@ -1,4 +1,4 @@
-// Launch menu renderer with separate main-menu and campaign pages.
+// Launch menu renderer with main-menu, campaign, and boot camp pages.
 window.createStartScreen = function createStartScreen(scene, onSelectMode, onExitGame) {
   console.log("levels:", window.LEVEL_DATA.levels.map((l) => l.id));
   const width = 1280;
@@ -8,8 +8,28 @@ window.createStartScreen = function createStartScreen(scene, onSelectMode, onExi
   const objects = [];
   const mainPageObjects = [];
   const campaignPageObjects = [];
+  const bootCampPageObjects = [];
+  const subPageObjects = [];
   let currentPage = "main";
   let chapterExpanded = false;
+  let hoveredLevelId = null;
+
+  function bindLevelHover(button, levelId, enabled) {
+    button.setInteractive({ useHandCursor: enabled })
+      .on("pointerover", () => {
+        if (enabled) button.setFillStyle(0x187568);
+        hoveredLevelId = levelId;
+        refreshLevelDescription();
+      })
+      .on("pointerout", () => {
+        button.setFillStyle(enabled ? 0x12584f : 0x263943);
+        if (hoveredLevelId === levelId) {
+          hoveredLevelId = null;
+          refreshLevelDescription();
+        }
+      });
+    if (enabled) button.on("pointerdown", () => onSelectMode(levelId));
+  }
 
   const background = scene.add.rectangle(width / 2, height / 2, width, height, 0x071824)
     .setDepth(depth);
@@ -22,15 +42,18 @@ window.createStartScreen = function createStartScreen(scene, onSelectMode, onExi
   objects.push(addPixelText(scene, "LINE OF\nBATTLE", 60, 104, 6, 0xe8f4f5, depth + 3));
   const mainSubtitle = addPixelText(scene, "COMMAND THE FLEET", 62, 258, 2, 0x56d8c3, depth + 3);
   const campaignSubtitle = addPixelText(scene, "SELECT A CHAPTER", 62, 258, 2, 0x56d8c3, depth + 3);
-  objects.push(mainSubtitle, campaignSubtitle);
+  const bootCampSubtitle = addPixelText(scene, "SELECT A TUTORIAL", 62, 258, 2, 0x56d8c3, depth + 3);
+  objects.push(mainSubtitle, campaignSubtitle, bootCampSubtitle);
   const divider = scene.add.rectangle(60, 302, 300, 2, 0x315260)
     .setOrigin(0, 0.5).setDepth(depth + 3);
   objects.push(divider);
   const mainHeading = addPixelText(scene, "MODES", 62, 337, 2, 0x8baab4, depth + 3);
   const campaignHeading = addPixelText(scene, "CAMPAIGN", 62, 337, 2, 0x8baab4, depth + 3);
-  objects.push(mainHeading, campaignHeading);
+  const bootCampHeading = addPixelText(scene, "BOOT CAMP", 62, 337, 2, 0x8baab4, depth + 3);
+  objects.push(mainHeading, campaignHeading, bootCampHeading);
   mainPageObjects.push(mainSubtitle, mainHeading);
   campaignPageObjects.push(campaignSubtitle, campaignHeading);
+  bootCampPageObjects.push(bootCampSubtitle, bootCampHeading);
 
   const menuLeft = 60;
   const menuCenterX = menuLeft + 150;
@@ -55,6 +78,47 @@ window.createStartScreen = function createStartScreen(scene, onSelectMode, onExi
     });
   objects.push(campaignButton, campaignLabel);
   mainPageObjects.push(campaignButton, campaignLabel);
+
+  const bootCampButton = scene.add.rectangle(menuCenterX, 469, 300, 58, 0x12584f)
+    .setDepth(depth + 3)
+    .setInteractive({ useHandCursor: true });
+  const bootCampLabel = window.PixelFont.create(scene, "> BOOT CAMP", {
+    x: menuCenterX,
+    y: 469 - 7 * 4 / 2,
+    pixelSize: 4,
+    color: 0xe8f4f5,
+    depth: depth + 4,
+    align: "center",
+  });
+  bootCampButton
+    .on("pointerover", () => bootCampButton.setFillStyle(0x187568))
+    .on("pointerout", () => bootCampButton.setFillStyle(0x12584f))
+    .on("pointerdown", () => {
+      currentPage = "boot-camp";
+      refreshPage();
+    });
+  objects.push(bootCampButton, bootCampLabel);
+  mainPageObjects.push(bootCampButton, bootCampLabel);
+
+  // Placeholder tutorials stay disabled until their level data is available.
+  Array.from({ length: 5 }, (_, index) => {
+    const levelId = `tutorial_${index + 1}`;
+    const y = 399 + index * 40;
+    const enabled = window.LEVEL_DATA.levels.some((level) => level.id === levelId);
+    const button = scene.add.rectangle(menuCenterX, y, 300, 32,
+      enabled ? 0x12584f : 0x263943).setDepth(depth + 3);
+    bindLevelHover(button, levelId, enabled);
+    const label = window.PixelFont.create(scene, levelId, {
+      x: menuCenterX,
+      y: y - 7 * 2 / 2,
+      pixelSize: 2,
+      color: enabled ? 0xe8f4f5 : 0x71818a,
+      depth: depth + 4,
+      align: "center",
+    });
+    objects.push(button, label);
+    bootCampPageObjects.push(button, label);
+  });
 
   const chapterButton = scene.add.rectangle(menuCenterX, 399, 300, 58, 0x103746)
     .setDepth(depth + 3)
@@ -89,12 +153,7 @@ window.createStartScreen = function createStartScreen(scene, onSelectMode, onExi
       28,
       enabled ? 0x12584f : 0x263943,
     ).setDepth(depth + 3);
-    if (enabled) {
-      button.setInteractive({ useHandCursor: true })
-        .on("pointerover", () => button.setFillStyle(0x187568))
-        .on("pointerout", () => button.setFillStyle(0x12584f))
-        .on("pointerdown", () => onSelectMode(levelId));                  // CHANGED
-    }
+    bindLevelHover(button, levelId, enabled);
     const label = window.PixelFont.create(scene, `LEVEL ${levelId}`, {    // CHANGED (optional, same output)
       x: menuCenterX + 10,
       y: y + 7,
@@ -126,19 +185,23 @@ window.createStartScreen = function createStartScreen(scene, onSelectMode, onExi
     align: "center",
   });
   objects.push(backButton, backLabel);
-  campaignPageObjects.push(backButton, backLabel);
+  subPageObjects.push(backButton, backLabel);
 
   function refreshPage() {
+    hoveredLevelId = null;
+    refreshLevelDescription();
     const onMainPage = currentPage === "main";
     mainPageObjects.forEach((object) => object.setVisible(onMainPage));
-    campaignPageObjects.forEach((object) => object.setVisible(!onMainPage));
+    const onCampaignPage = currentPage === "campaign";
+    campaignPageObjects.forEach((object) => object.setVisible(onCampaignPage));
+    bootCampPageObjects.forEach((object) => object.setVisible(currentPage === "boot-camp"));
+    subPageObjects.forEach((object) => object.setVisible(!onMainPage));
     chapterLabel.setPixelText(`${chapterExpanded ? "v" : ">"} CHAPTER 1: PACIFIC SKIRMISH`);
     levelRows.forEach(({ button, label }) => {
-      button.setVisible(!onMainPage && chapterExpanded);
-      label.setVisible(!onMainPage && chapterExpanded);
+      button.setVisible(onCampaignPage && chapterExpanded);
+      label.setVisible(onCampaignPage && chapterExpanded);
     });
   }
-  refreshPage();
 
   const exitY = 653;
   const exitButtonWidth = 300;
@@ -181,9 +244,46 @@ window.createStartScreen = function createStartScreen(scene, onSelectMode, onExi
     .setDepth(depth + 3);
   objects.push(portraitPanel, sign, signTop, signTitle, signRule);
 
+  const descriptionTitle = addPixelText(scene, "", 600, 305, 3, 0xe8f4f5, depth + 3);
+  const descriptionBody = addPixelText(scene, "", 600, 370, 2, 0xc3d9df, depth + 3);
+  objects.push(descriptionTitle, descriptionBody);
+
+  function wrapDescription(text, maxCharacters) {
+    return String(text).split("\n").map((paragraph) => {
+      const words = paragraph.match(new RegExp(`\\S{1,${maxCharacters}}`, "g")) || [];
+      const lines = [""];
+      words.forEach((word) => {
+        const index = lines.length - 1;
+        if (lines[index] && lines[index].length + word.length + 1 > maxCharacters) {
+          lines.push(word);
+        } else {
+          lines[index] += `${lines[index] ? " " : ""}${word}`;
+        }
+      });
+      return lines.join("\n");
+    }).join("\n");
+  }
+
+  function refreshLevelDescription() {
+    const hasHover = hoveredLevelId != null;
+    signTop.setVisible(!hasHover);
+    signTitle.setVisible(!hasHover);
+    signRule.setVisible(!hasHover);
+    descriptionTitle.setVisible(hasHover);
+    descriptionBody.setVisible(hasHover);
+    if (!hasHover) return;
+    const level = window.LEVEL_DATA.levels.find((candidate) => candidate.id === hoveredLevelId);
+    descriptionTitle.setPixelText(wrapDescription(level?.name || hoveredLevelId, 28));
+    descriptionBody.setPixelText(wrapDescription(
+      level?.description || "Description coming soon.", 42,
+    ));
+  }
+  refreshPage();
+
   scene.cameras.main.ignore(objects);
   return {
     hide() {
+      hoveredLevelId = null;
       objects.forEach((object) => object.setVisible(false));
     },
     show() {

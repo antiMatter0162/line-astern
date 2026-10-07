@@ -9,6 +9,26 @@
 
 // Fallback values so a class file only has to specify what makes it unique
 
+// Tactical tuning is overridable per ship type and through level ai.parameters.
+// Defaults retain the existing AI behavior; distances are world units.
+const SHIP_AI_DEFAULTS = {
+  avoidBattleships: false,
+  battleshipAvoidanceTrigger: 2150,
+  battleshipAvoidanceDistance: 2250,
+  targetSwitchRangeFactor: 0.85,
+  preferredRange: null,
+  engagementRangeFactor: 0.45,
+  engagementRangeCap: 1300,
+  minimumRangeMargin: 200,
+  maximumRangeMargin: 100,
+  flankDistance: 700,
+  fullDistance: 300,
+  matchSpeedDistance: 120,
+  fullSpeedOrderId: "ahead_full",
+  waypointIntervalMs: 20000,
+  avoidanceWaypointIntervalMs: 1500,
+};
+
 const SHIP_TYPE_DEFAULTS = {
   displayWidth: 56,
   displayHeight: 130,
@@ -60,6 +80,12 @@ function registerShipType(typeDef) {
     ...typeDef,
     textures: { ...typeDef.textures },
     assetPaths: { ...typeDef.assetPaths },
+    aiParameters: {
+      ...SHIP_AI_DEFAULTS,
+      // Heavy and light cruisers retain their existing battleship avoidance.
+      avoidBattleships: typeDef.shipClass === 1 || typeDef.shipClass === 2,
+      ...typeDef.aiParameters,
+    },
     dispersionCurve: {
       ...SHIP_TYPE_DEFAULTS.dispersionCurve,
       ...typeDef.dispersionCurve,

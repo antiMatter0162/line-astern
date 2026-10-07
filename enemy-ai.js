@@ -15,18 +15,40 @@ window.createEnemyAI = function createEnemyAI(deps) {
     removeWaypointMarker,
     createFireTarget,
     refreshShipDispersionEllipse,
+    clearShipFireTarget,
   } = deps;
 
   const DECISION_INTERVAL = 0.75;
-  const WAYPOINT_INTERVAL_MS = 20000;
-  const AVOIDANCE_WAYPOINT_INTERVAL_MS = 1500;
-  const TARGET_SWITCH_RANGE_FACTOR = 0.85;
   const BATTLESHIP_CLASS = 0;
-  const CRUISER_CLASSES = new Set([1, 2]);
-  const BATTLESHIP_AVOIDANCE_TRIGGER = 2150;
-  const BATTLESHIP_AVOIDANCE_GOAL = 2250;
   const shipStates = new WeakMap();
   let decisionClock = 0;
+
+  function getParameters(ship) {
+    const defaults = ship.stats.aiParameters;
+    const overrides = ship.aiSettings?.parameters;
+    const parameters = { ...defaults, ...overrides };
+    // Preserve the latest level behavior: a configured retreat goal also moves
+    // the trigger 100 units inward unless an explicit trigger is supplied.
+    parameters.battleshipAvoidanceDistance = overrides?.battleshipAvoidanceDistance
+      ?? defaults.battleshipAvoidanceDistance;
+    parameters.battleshipAvoidanceTrigger = overrides?.battleshipAvoidanceTrigger
+      ?? (overrides?.battleshipAvoidanceDistance != null
+        ? parameters.battleshipAvoidanceDistance - 100
+        : defaults.battleshipAvoidanceTrigger);
+    return parameters;
+  }
+
+  // A linear scan preserves first-in-list tie breaking without sorting a fleet.
+  function findNearestShip(origin, candidates) {
+    let nearest = null;
+    for (const ship of candidates) {
+      const distance = Phaser.Math.Distance.Between(
+        origin.sprite.x, origin.sprite.y, ship.sprite.x, ship.sprite.y,
+      );
+      if (!nearest || distance < nearest.distance) nearest = { ship, distance };
+    }
+    return nearest;
+  }
 
   function getShipState(ship) {
     if (!shipStates.has(ship)) {
@@ -40,16 +62,6 @@ window.createEnemyAI = function createEnemyAI(deps) {
     return shipStates.get(ship);
   }
 
-  // Reads the per-level battleshipAvoidanceDistance from the ship's AI settings.
-  // null/missing falls back to the built-in defaults (2150 trigger, 2250 goal).
-  function getAvoidanceDistances(ship) {
-    const configured = ship.aiSettings?.parameters?.battleshipAvoidanceDistance;
-    if (configured == null) {
-      return { goal: BATTLESHIP_AVOIDANCE_GOAL, trigger: BATTLESHIP_AVOIDANCE_TRIGGER };
-    }
-    return { goal: configured, trigger: configured - 100 };
-  }
-
   function update(scene, dt) {
     decisionClock += dt;
     if (decisionClock < DECISION_INTERVAL) return;
@@ -61,31 +73,17 @@ window.createEnemyAI = function createEnemyAI(deps) {
     );
     ships.forEach((enemy) => {
       if (enemy.team !== teams.ENEMY || enemy.sinking || enemy.sunk) return;
-      const isCruiser = CRUISER_CLASSES.has(enemy.shipClass);
-      const battleships = isCruiser
+      const parameters = getParameters(enemy);
+      const battleships = parameters.avoidBattleships
         ? playerShips.filter((ship) => ship.shipClass === BATTLESHIP_CLASS)
         : [];
-      const nearestBattleship = battleships
-        .map((ship) => ({
-          ship,
-          distance: Phaser.Math.Distance.Between(
-            enemy.sprite.x, enemy.sprite.y, ship.sprite.x, ship.sprite.y,
-          ),
-        }))
-        .sort((a, b) => a.distance - b.distance)[0];
-      const eligibleTargets = isCruiser
+      const nearestBattleship = findNearestShip(enemy, battleships);
+      const eligibleTargets = parameters.avoidBattleships
         ? playerShips.filter((ship) => ship.shipClass !== BATTLESHIP_CLASS)
         : playerShips;
-      const nearestPlayer = eligibleTargets
-        .map((target) => ({
-          target,
-          distance: Phaser.Math.Distance.Between(
-            enemy.sprite.x, enemy.sprite.y, target.sprite.x, target.sprite.y,
-          ),
-        }))
-        .sort((a, b) => a.distance - b.distance)[0];
+      const nearestPlayer = findNearestShip(enemy, eligibleTargets);
       const shouldAvoidBattleship = nearestBattleship
-        && (nearestBattleship.distance < getAvoidanceDistances(enemy).trigger || !nearestPlayer);
+        && (nearestBattleship.distance < parameters.battleshipAvoidanceTrigger || !nearestPlayer);
 
       if (!nearestPlayer && !shouldAvoidBattleship) {
         clearEnemyAiTarget(enemy);
@@ -95,13 +93,13 @@ window.createEnemyAI = function createEnemyAI(deps) {
 
       const state = getShipState(enemy);
       if (shouldAvoidBattleship) {
-        const retreatDestination = getBattleshipRetreatDestination(enemy, battleships);
+        const retreatDestination = getBattleshipRetreatDestination(enemy, nearestBattleship, parameters);
         const distanceToSafetyPosition = Phaser.Math.Distance.Between(
           enemy.sprite.x, enemy.sprite.y, retreatDestination.x, retreatDestination.y,
         );
         setAiSpeed(enemy, nearestBattleship.ship, distanceToSafetyPosition);
         setAiDestination(scene, enemy, retreatDestination, true);
-        const preferredTarget = nearestPlayer?.target;
+        const preferredTarget = nearestPlayer?.ship;
         const preferredDistance = nearestPlayer?.distance ?? Infinity;
         const battleshipDistance = nearestBattleship.distance;
         const preferredCanFire = preferredTarget
@@ -126,12 +124,6 @@ window.createEnemyAI = function createEnemyAI(deps) {
         return;
       }
 
-      if (!nearestPlayer) {
-        clearEnemyAiTarget(enemy);
-        clearEnemyAiDestination(enemy);
-        return;
-      }
-
       const currentTarget = eligibleTargets.find((candidate) => candidate === state.targetShip);
       const currentTargetDistance = currentTarget
         ? Phaser.Math.Distance.Between(
@@ -140,8 +132,8 @@ window.createEnemyAI = function createEnemyAI(deps) {
         : Infinity;
       const canSwitchTarget = !currentTarget
         || currentTargetDistance
-          >= enemy.stats.maxFiringDistance * TARGET_SWITCH_RANGE_FACTOR;
-      const target = currentTarget && !canSwitchTarget ? currentTarget : nearestPlayer.target;
+          >= enemy.stats.maxFiringDistance * parameters.targetSwitchRangeFactor;
+      const target = currentTarget && !canSwitchTarget ? currentTarget : nearestPlayer.ship;
       const targetDistance = target === currentTarget
         ? currentTargetDistance
         : Phaser.Math.Distance.Between(
@@ -182,16 +174,7 @@ window.createEnemyAI = function createEnemyAI(deps) {
     return dx * Math.cos(beamAngle) + dy * Math.sin(beamAngle) >= 0 ? 1 : -1;
   }
 
-  function getBattleshipRetreatDestination(ship, battleships) {
-    const goal = getAvoidanceDistances(ship).goal;
-    const nearest = battleships.reduce((closest, candidate) => {
-      const distance = Phaser.Math.Distance.Between(
-        ship.sprite.x, ship.sprite.y, candidate.sprite.x, candidate.sprite.y,
-      );
-      return !closest || distance < closest.distance ? { ship: candidate, distance } : closest;
-    }, null);
-    if (!nearest) return { x: ship.sprite.x, y: ship.sprite.y };
-
+  function getBattleshipRetreatDestination(ship, nearest, parameters) {
     const dx = ship.sprite.x - nearest.ship.sprite.x;
     const dy = ship.sprite.y - nearest.ship.sprite.y;
     const angle = Math.hypot(dx, dy) > 0
@@ -199,11 +182,11 @@ window.createEnemyAI = function createEnemyAI(deps) {
       : ship.sprite.rotation - Math.PI / 2;
     return {
       x: Phaser.Math.Clamp(
-        nearest.ship.sprite.x + Math.cos(angle) * goal,
+        nearest.ship.sprite.x + Math.cos(angle) * parameters.battleshipAvoidanceDistance,
         0, mapWidth,
       ),
       y: Phaser.Math.Clamp(
-        nearest.ship.sprite.y + Math.sin(angle) * goal,
+        nearest.ship.sprite.y + Math.sin(angle) * parameters.battleshipAvoidanceDistance,
         0, mapHeight,
       ),
     };
@@ -211,17 +194,24 @@ window.createEnemyAI = function createEnemyAI(deps) {
 
   function getEngagementRange(ship) {
     const { minFiringDistance, maxFiringDistance } = ship.stats;
-    const upperBound = Math.min(1300, maxFiringDistance - 100);
-    return Phaser.Math.Clamp(maxFiringDistance * 0.45, minFiringDistance + 200, upperBound);
+    const parameters = getParameters(ship);
+    const upperBound = Math.min(parameters.engagementRangeCap, maxFiringDistance - parameters.maximumRangeMargin);
+    return Phaser.Math.Clamp(
+      parameters.preferredRange ?? maxFiringDistance * parameters.engagementRangeFactor,
+      minFiringDistance + parameters.minimumRangeMargin,
+      upperBound,
+    );
   }
 
   function setAiSpeed(ship, target, distanceToFormation) {
+    const parameters = getParameters(ship);
     let desiredOrderIndex;
-    if (distanceToFormation > 700) {
+    if (distanceToFormation > parameters.flankDistance) {
       desiredOrderIndex = speedOrders.length - 1;
-    } else if (distanceToFormation > 300) {
-      desiredOrderIndex = 3;
-    } else if (distanceToFormation > 120) {
+    } else if (distanceToFormation > parameters.fullDistance) {
+      const fullOrderIndex = speedOrders.findIndex((order) => order.id === parameters.fullSpeedOrderId);
+      desiredOrderIndex = fullOrderIndex < 0 ? defaultSpeedOrderIndex : fullOrderIndex;
+    } else if (distanceToFormation > parameters.matchSpeedDistance) {
       desiredOrderIndex = defaultSpeedOrderIndex;
     } else {
       const targetSpeedFraction = target.speed / ship.maxSpeed;
@@ -236,13 +226,14 @@ window.createEnemyAI = function createEnemyAI(deps) {
   function setAiDestination(scene, ship, destination, isAvoidance = false) {
     const state = getShipState(ship);
     if (!isAvoidance && ship.target && ship.target.isBoundaryTurn) return;
+    const parameters = getParameters(ship);
     const now = scene.time.now;
     const lastChange = isAvoidance
       ? state.lastAvoidanceWaypointChange
       : state.lastWaypointChange;
     const changeInterval = isAvoidance
-      ? AVOIDANCE_WAYPOINT_INTERVAL_MS
-      : WAYPOINT_INTERVAL_MS;
+      ? parameters.avoidanceWaypointIntervalMs
+      : parameters.waypointIntervalMs;
     if (now - lastChange < changeInterval) return;
 
     resetSustainedAimForTurn(ship, destination.x, destination.y);
@@ -296,11 +287,7 @@ window.createEnemyAI = function createEnemyAI(deps) {
   }
 
   function clearEnemyAiTarget(ship) {
-    ship.fireTarget = null;
-    if (ship.dispersionEllipse) {
-      ship.dispersionEllipse.destroy();
-      ship.dispersionEllipse = null;
-    }
+    clearShipFireTarget(ship);
   }
 
   return { update };

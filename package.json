@@ -16,6 +16,7 @@
     "productName": "Line of Battle",
     "files": [
       "electron-main.js",
+      "preload.js",
       "index.html",
       "enemy-ai.js",
       "pixel-font.js",
@@ -24,6 +25,7 @@
       "campaign/**/*",
       "main.js",
       "ship-types.js",
+      "*-class.js",
       "assets/**/*"
     ],
     "win": {
