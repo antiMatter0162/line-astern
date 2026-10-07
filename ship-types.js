@@ -67,6 +67,8 @@ const SHIP_TYPE_DEFAULTS = {
 };
 
 const SHIP_TYPES = {};
+// Battleship, heavy cruiser, light cruiser, destroyer. Heavy cruiser is the baseline.
+const SHIP_COMBAT_EFFECT_SCALES = [1.5, 1, 0.75, 0.65];
 
 // Call once per class file: registerShipType({ id: "pennsylvania", ... }).
 // Anything the class file doesn't specify is filled in from
@@ -77,6 +79,7 @@ function registerShipType(typeDef) {
   }
   SHIP_TYPES[typeDef.id] = {
     ...SHIP_TYPE_DEFAULTS,
+    combatEffectScale: SHIP_COMBAT_EFFECT_SCALES[typeDef.shipClass] ?? 1,
     ...typeDef,
     textures: { ...typeDef.textures },
     assetPaths: { ...typeDef.assetPaths },

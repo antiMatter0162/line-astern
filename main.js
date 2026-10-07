@@ -1415,7 +1415,8 @@ function fireTurretVolley(ship, turret) {
       ship.stats.dispersionSigma,
       ship.fireTarget.dispersionFactor ?? 1,
     );
-    spawnShell(scene, muzzleX, muzzleY, targetX + dispersion.x, targetY + dispersion.y, ship.stats.shellAlpha);
+    spawnShell(scene, muzzleX, muzzleY, targetX + dispersion.x, targetY + dispersion.y,
+      ship.stats.shellAlpha, ship.stats.combatEffectScale);
   });
 }
 
@@ -1623,7 +1624,7 @@ function updateDispersionEllipseVisibility() {
   });
 }
 
-function spawnShell(scene, x, y, targetX, targetY, damage) {
+function spawnShell(scene, x, y, targetX, targetY, damage, combatEffectScale = 1) {
   const angle = Phaser.Math.Angle.Between(x, y, targetX, targetY);
   const sprite = shellSpritePool.pop() || scene.add.sprite(0, 0, "shell");
   sprite.setPosition(x, y)
@@ -1640,6 +1641,8 @@ function spawnShell(scene, x, y, targetX, targetY, damage) {
     targetX,
     targetY,
     damage,
+    // Keep the firing ship's effect size even if it sinks before impact.
+    combatEffectScale,
   });
 }
 
@@ -1870,25 +1873,26 @@ function resolveShellSplash(shell) {
       // Already dying — no further damage, just pick the effect that
       // matches whichever part of the hull got hit.
       if (isPointSubmerged(ship, shell.targetX, shell.targetY)) {
-        spawnSplash(scene, shell.targetX, shell.targetY);
+        spawnSplash(scene, shell.targetX, shell.targetY, shell.combatEffectScale);
       } else {
-        spawnHitExplosion(scene, shell.targetX, shell.targetY, ship);
+        spawnHitExplosion(scene, shell.targetX, shell.targetY, ship, shell.combatEffectScale);
       }
     } else {
       ship.health = Math.max(0, ship.health - shell.damage);
-      spawnHitExplosion(scene, shell.targetX, shell.targetY, ship);
+      spawnHitExplosion(scene, shell.targetX, shell.targetY, ship, shell.combatEffectScale);
     }
     resolved = true;
   });
 
   if (!resolved) {
-    spawnSplash(scene, shell.targetX, shell.targetY);
+    spawnSplash(scene, shell.targetX, shell.targetY, shell.combatEffectScale);
   }
 }
 
-function spawnSplash(scene, x, y) {
+function spawnSplash(scene, x, y, combatEffectScale = 1) {
+  const size = SPLASH_DISPLAY_SIZE * combatEffectScale;
   const sprite = scene.add.sprite(x, y, "splash")
-    .setDisplaySize(SPLASH_DISPLAY_SIZE, SPLASH_DISPLAY_SIZE)
+    .setDisplaySize(size, size)
     .setDepth(1.9); // above ocean/markers, still well under any hull
   worldContainer.add(sprite);
   registerTacticalHiddenEffect(sprite);
@@ -1896,9 +1900,10 @@ function spawnSplash(scene, x, y) {
   sprite.once("animationcomplete", () => destroyTacticalHiddenEffect(sprite));
 }
 
-function spawnHitExplosion(scene, x, y, ship) {
+function spawnHitExplosion(scene, x, y, ship, combatEffectScale = 1) {
+  const size = HIT_EXPLOSION_DISPLAY_SIZE * combatEffectScale;
   const sprite = scene.add.sprite(x, y, "hit-explosion")
-    .setDisplaySize(HIT_EXPLOSION_DISPLAY_SIZE, HIT_EXPLOSION_DISPLAY_SIZE)
+    .setDisplaySize(size, size)
     .setDepth(2.9); // above hulls (2) and shells (2.8), below turrets (2.4+ already covers this ship's own turrets since it's higher — see note below)
   worldContainer.add(sprite);
   registerTacticalHiddenEffect(sprite);
@@ -2246,7 +2251,8 @@ function beginSinking(ship) {
   ship.deathDriftHeading = ship.sprite.rotation - Math.PI / 2;
   ship.deathDriftElapsed = 0;
   ship.deathDriftRemaining = ship.deathDriftSpeed * DEATH_DRIFT_SECONDS / 2;
-  const explosionSize = Math.max(ship.stats.displayWidth, ship.stats.displayHeight) * 0.6;
+  const explosionSize = Math.max(ship.stats.displayWidth, ship.stats.displayHeight)
+    * 0.6 * ship.stats.combatEffectScale;
   const explosionSprite = scene.add.sprite(ship.sprite.x, ship.sprite.y, "explosion")
     .setDisplaySize(explosionSize, explosionSize)
     .setDepth(SINKING_EXPLOSION_DEPTH);
