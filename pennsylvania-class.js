@@ -3,6 +3,7 @@
 registerShipType({
   id: "pennsylvania",
   label: "Pennsylvania-Class Battleship",
+  shipNames: ["Pennsylvania", "Arizona"],
   shipClass: 0,
 
   textures: {

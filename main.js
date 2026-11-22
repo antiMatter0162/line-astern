@@ -23,7 +23,7 @@ const config = {
   backgroundColor: "#06345a",
 
   render: {
-    roundPixels: true,
+    roundPixels: false,
     antialias: true,
   },
 
@@ -111,6 +111,27 @@ const TEAMS = {
 function getCommandableShips() {
   return selectedShips.filter((ship) => ship.team === TEAMS.PLAYER && !ship.sinking);
 }
+
+const formationSystem = window.createFormationSystem({
+  getShips: () => ships,
+  playerTeam: TEAMS.PLAYER,
+  clearOrders: clearShipMovementOrders,
+});
+let formationEditor = null;
+let formationMovementOverlay = null;
+let formationPreviewMarkers = [];
+const FORMATION_PREVIEW_SECONDS = 3;
+const FORMATION_PREVIEW_STEP = 1 / 24;
+// Stable actions for future HUD buttons/key bindings; editor placement is optional.
+window.formationControls = {
+  create: () => formationSystem.create(getCommandableShips()),
+  returnToFormation: () => formationSystem.returnToFormation(getCommandableShips()),
+  openEditor: () => formationEditor?.show(),
+  closeEditor: () => formationEditor?.hide(),
+  setEditorPosition: (x, y) => formationEditor?.setPosition(x, y),
+  mountEditor: (parent) => formationEditor?.mount(parent),
+  system: formationSystem,
+};
 
 const SINKING_HULL_DEPTH = 1.2;
 const SINKING_TURRET_DEPTH = 1.5;
@@ -279,7 +300,8 @@ let startScreenActive = true;
 let startScreenMenu = null;
 
 function spawnLevelShips(scene, level) {
-  return level.ships.map((definition) => {
+  const usedNames = new Set();
+  return level.ships.map((definition, index) => {
     const ship = createShip(
       scene,
       definition.position.x,
@@ -289,6 +311,13 @@ function spawnLevelShips(scene, level) {
       Phaser.Math.DegToRad(definition.headingDegrees ?? 0),
     );
     ship.levelShipId = definition.id;
+    const baseName = definition.name?.trim()
+      || ship.stats.shipNames?.find((name) => !usedNames.has(name.toUpperCase()))
+      || `${ship.stats.id} ${index + 1}`;
+    let name = baseName;
+    for (let suffix = 2; usedNames.has(name.toUpperCase()); suffix += 1) name = `${baseName} ${suffix}`;
+    ship.name = name;
+    usedNames.add(name.toUpperCase());
     ship.aiSettings = definition.ai
       ? { ...definition.ai, parameters: { ...(definition.ai.parameters || {}) } }
       : null;
@@ -298,6 +327,11 @@ function spawnLevelShips(scene, level) {
 
 // Tears down everything belonging to the current level so a new one starts clean.
 function clearLevel(scene) {
+  formationEditor?.hide();
+  formationMovementOverlay?.clear().setVisible(false);
+  formationPreviewMarkers.forEach((marker) => marker.destroy());
+  formationPreviewMarkers = [];
+  formationSystem.clear();
   if (tacticalDisplayActive) setTacticalDisplay(scene, false);
   clearFiringArcDebug();
   firingArcDebugActive = false;
@@ -531,6 +565,7 @@ function create() {
   // A second camera, permanently un-zoomed and un-scrolled, dedicated to HUD
   // elements.
   uiCamera = this.cameras.add(0, 0, config.width, config.height);
+  uiCamera.roundPixels = true;
   uiCamera.ignore(worldContainer);
   uiCamera.setScroll(0, 0);
   uiCamera.setZoom(1);
@@ -643,6 +678,11 @@ function create() {
     });
   });
   createSpeedHud(this);
+  formationEditor = window.createFormationEditor({
+    system: formationSystem,
+    getSelection: getCommandableShips,
+    canEdit: () => !gamePaused && !startScreenActive,
+  });
   updateSpeedHud();
   createFiringHud(this);
   createCannotAimHud(this);
@@ -671,6 +711,12 @@ function create() {
   this.input.keyboard.on("keydown-F", () => { if (!gamePaused) toggleFiringMode(); });
   this.input.keyboard.on("keydown-X", () => { if (!gamePaused) stopFiring(); });
   this.input.keyboard.on("keydown-SPACE", () => { if (!gamePaused) stopSelectedShips(); });
+  this.input.keyboard.on("keydown-G", (event) => {
+    if (!gamePaused && !event.repeat) formationEditor.toggle();
+  });
+  this.input.keyboard.on("keydown-R", (event) => {
+    if (!gamePaused && !event.repeat) formationSystem.returnToFormation(getCommandableShips());
+  });
   //this.input.keyboard.on("keydown-PERIOD", killSelectedShips); // debug: force-sink selected ships
   this.input.keyboard.on("keydown", (event) => {
     if (gamePaused || event.code !== "AltLeft" || firingArcDebugActive) return;
@@ -996,21 +1042,29 @@ function randomOceanWaveTint() {
 
 function update(time, delta) {
   updateSpeedOrderCooldownVisuals();
+  if (gamePaused) formationEditor?.hide();
   if (gamePaused) return;
   const dt = delta / 1000;
   enemyAI.update(this, dt);
-  ships.forEach((ship) => updateShip(ship, dt));
+  formationSystem.update(dt);
+  formationEditor?.refresh();
+  ships.forEach((ship) => updateShipMovement(ship, dt));
   ships = ships.filter((ship) => !ship.sunk);
+  // Attachments use the final hull positions, including any contact correction.
+  resolveShipCollisions(dt);
+  ships.forEach((ship) => {
+    if (!ship.sinking) updateShipAfterMovement(ship, dt);
+  });
   updateCameraFocus(this.cameras.main, dt);
   updateCameraPan(this.cameras.main, cameraPanKeys, dt);
   updateCameraZoom(this.cameras.main, cameraZoomKeys, dt);
   enforceTacticalZoomBounds(this.cameras.main);
   updateOceanWaves(this, dt);
   updateTacticalSymbols(this.cameras.main);
-  resolveShipCollisions(dt);
   updateShells(dt);
   updateAttachedHitExplosions();
   updateWakes(dt);
+  updateFormationMovementPreviews(this);
   if (firingArcDebugActive) drawFiringArcDebug(this);
 }
 
@@ -1388,25 +1442,30 @@ function clearShipFireTarget(ship) {
 
 function updateFiring(ship, dt) {
   if (!ship.fireTarget) return;
+  const { x, y } = ship.sprite;
+  const aimPoint = getFireAimPoint(ship, x, y);
+  const aimInRange = Math.hypot(aimPoint.x - x, aimPoint.y - y) <= ship.stats.maxFiringDistance;
   ship.turrets.forEach((turret) => {
-    turret.reloadTimer -= dt;
-    if (turret.reloadTimer > 0) return;
-    if (!turret.onTarget) return;
-    fireTurretVolley(ship, turret);
-    turret.reloadTimer = ship.stats.turretReloadSeconds;
+    turret.reloadTimer = Math.max(0, turret.reloadTimer - dt);
+    if (turret.reloadTimer > 0 || !turret.onTarget || !aimInRange) return;
+    if (fireTurretVolley(ship, turret)) turret.reloadTimer = ship.stats.turretReloadSeconds;
   });
 }
 
 function fireTurretVolley(ship, turret) {
   const scene = ship.sprite.scene;
+  const { x: shipX, y: shipY } = ship.sprite;
+  const { maxFiringDistance } = ship.stats;
   const cos = Math.cos(turret.sprite.rotation);
   const sin = Math.sin(turret.sprite.rotation);
-  ship.barrelLocalOffsets.forEach((barrel) => {
+  let fired = false;
+  for (const barrel of ship.barrelLocalOffsets) {
     const muzzleX = turret.sprite.x + barrel.dx * cos - barrel.dy * sin;
     const muzzleY = turret.sprite.y + barrel.dx * sin + barrel.dy * cos;
     const aimPoint = getFireAimPoint(ship, muzzleX, muzzleY);
     const targetX = aimPoint.x;
     const targetY = aimPoint.y;
+    if (Math.hypot(targetX - shipX, targetY - shipY) > maxFiringDistance) continue;
     const distance = Phaser.Math.Distance.Between(muzzleX, muzzleY, targetX, targetY);
     const dispersion = getDispersionOffset(
       distance,
@@ -1415,9 +1474,14 @@ function fireTurretVolley(ship, turret) {
       ship.stats.dispersionSigma,
       ship.fireTarget.dispersionFactor ?? 1,
     );
-    spawnShell(scene, muzzleX, muzzleY, targetX + dispersion.x, targetY + dispersion.y,
+    const impactDx = targetX + dispersion.x - shipX;
+    const impactDy = targetY + dispersion.y - shipY;
+    const rangeScale = Math.min(1, maxFiringDistance / Math.hypot(impactDx, impactDy));
+    spawnShell(scene, muzzleX, muzzleY, shipX + impactDx * rangeScale, shipY + impactDy * rangeScale,
       ship.stats.shellAlpha, ship.stats.combatEffectScale);
-  });
+    fired = true;
+  }
+  return fired;
 }
 
 function getFireAimPoint(ship, originX, originY) {
@@ -2130,7 +2194,10 @@ function computeAvoidanceSteering(ship) {
     const dx = ship.sprite.x - other.sprite.x;
     const dy = ship.sprite.y - other.sprite.y;
     const dist = Math.sqrt(dx * dx + dy * dy);
-    const safeDist = ship.collisionRadius + other.collisionRadius + lookahead;
+    // Planned station spacing must not trigger the long-range fleet avoidance
+    // that otherwise continually pushes formation members out of position.
+    const clearance = formationSystem.areStationMates(ship, other) ? 24 : lookahead;
+    const safeDist = ship.collisionRadius + other.collisionRadius + clearance;
 
     if (dist <= 0 || dist >= safeDist) return;
 
@@ -2503,7 +2570,8 @@ function isPointerOverSpeedHud(pointer) {
 
 // The speed a ship should currently be cruising at, based on its speed order.
 function getCommandedSpeed(ship) {
-  return ship.maxSpeed * SPEED_ORDERS[ship.speedOrderIndex].fraction;
+  return formationSystem.getCommandedSpeed(ship,
+    ship.maxSpeed * SPEED_ORDERS[ship.speedOrderIndex].fraction);
 }
 
 function setShipSpeedOrder(ship, orderIndex) {
@@ -2519,16 +2587,22 @@ function setSpeedOrder(orderIndex) {
   if (commandableShips.length === 0) return;
   const eligibleShips = commandableShips.filter((ship) =>
     ship.sprite.scene.time.now >= ship.speedOrderCooldownUntil
-      && ship.speedOrderIndex !== orderIndex,
+      && formationSystem.getSpeedOrderShips(ship).some((member) => member.speedOrderIndex !== orderIndex),
   );
   if (eligibleShips.length === 0) return;
 
-  eligibleShips.forEach((ship) => {
-    setShipSpeedOrder(ship, orderIndex);
-    ship.pendingWaypointSpeedOrder = false;
-    ship.waypointSpeedOrderDueAt = 0;
-    beginSpeedOrderCooldown(ship);
+  formationSystem.routeOrder(eligibleShips, commandableShips).forEach((ship) => {
+    applySpeedOrder(ship, orderIndex);
   });
+}
+
+function applySpeedOrder(ship, orderIndex) {
+  for (const member of formationSystem.getSpeedOrderShips(ship)) {
+    member.pendingWaypointSpeedOrder = false;
+    member.waypointSpeedOrderDueAt = 0;
+    setShipSpeedOrder(member, orderIndex);
+  }
+  beginSpeedOrderCooldown(ship);
 }
 
 function beginSpeedOrderCooldown(ship) {
@@ -2551,10 +2625,7 @@ function applyPendingWaypointSpeedOrder(ship) {
   const scene = ship.sprite.scene;
   if (scene.time.now < ship.waypointSpeedOrderDueAt
     || scene.time.now < ship.speedOrderCooldownUntil) return;
-  ship.pendingWaypointSpeedOrder = false;
-  ship.waypointSpeedOrderDueAt = 0;
-  if (!setShipSpeedOrder(ship, 0)) return;
-  beginSpeedOrderCooldown(ship);
+  applySpeedOrder(ship, 0);
 }
 
 function createSpeedHud(scene) {
@@ -2700,11 +2771,12 @@ function updateSpeedOrderCooldownVisuals() {
 }
 
 function issueMoveOrder(x, y, append) {
-  const commandableShips = getCommandableShips();
+  const commandableShips = formationSystem.routeOrder(getCommandableShips());
   if (commandableShips.length === 0) return;
 
   const scene = commandableShips[0].sprite.scene;
   commandableShips.forEach((ship) => {
+    ship.movementStopped = false;
     ship.continueStraightAfterWaypoint = true;
     ship.braking = false;
     ship.pendingWaypointSpeedOrder = false;
@@ -2761,21 +2833,25 @@ function advanceToNextWaypoint(ship) {
   ship.target = ship.waypoints.shift() || null;
 }
 
-function getTurnRadius(ship) {
-  return ship.speed > 0 ? ship.speed / ship.turnRate : 0;
+function getTurnRadius(ship, direction = 1) {
+  if (ship.speed <= 0) return 0;
+  const turnRate = formationSystem.getTurnRateLimit(ship, direction);
+  return ship.speed / Math.max(turnRate, ship.turnRate * 0.05);
 }
 
 function isCloseWaypointBehindShip(ship, distance) {
-  if (!ship.target || ship.waypoints.length > 0 || ship.speed <= 0) return false;
-  const turnRadius = getTurnRadius(ship);
-  if (turnRadius <= 0 || distance > Math.max(24, turnRadius * 0.5)) return false;
+  if (!ship.target || ship.speed <= 0) return false;
 
   const targetHeading = Phaser.Math.Angle.Between(
     ship.sprite.x, ship.sprite.y, ship.target.x, ship.target.y,
   );
   const currentHeading = ship.sprite.rotation - Math.PI / 2;
-  const headingDelta = Math.abs(Phaser.Math.Angle.Wrap(targetHeading - currentHeading));
-  return headingDelta >= Phaser.Math.DegToRad(120);
+  const headingDelta = Phaser.Math.Angle.Wrap(targetHeading - currentHeading);
+  const turnRadius = getTurnRadius(ship, Math.sign(headingDelta));
+  // A passed point inside the turn-clearance area is no longer a useful target.
+  // Use the same radius as steering, including formation turn restrictions.
+  return distance <= Math.max(120, turnRadius * 1.1)
+    && Math.abs(headingDelta) >= Phaser.Math.DegToRad(120);
 }
 
 function updateShipRudder(ship, angleDelta, dt) {
@@ -2801,7 +2877,10 @@ function updateShipRudder(ship, angleDelta, dt) {
     && Math.abs(rotationChange) > Math.abs(angleDelta)) {
     rotationChange = angleDelta;
   }
-  ship.sprite.rotation += rotationChange;
+  const limitedRotation = formationSystem.limitRotationChange(ship, rotationChange, dt);
+  if (limitedRotation !== rotationChange && dt > 0) ship.rudder = limitedRotation / (ship.turnRate * dt);
+  ship.angularVelocity = dt > 0 ? limitedRotation / dt : 0;
+  ship.sprite.rotation += limitedRotation;
 }
 
 function calculateMinimumTurnWindow(ship) {
@@ -2820,8 +2899,9 @@ function calculateMinimumTurnWindow(ship) {
     nextWaypoint.x,
     nextWaypoint.y,
   );
-  const cornerAngle = Math.abs(Phaser.Math.Angle.Wrap(outgoingAngle - incomingAngle));
-  const turnRadius = getTurnRadius(ship);
+  const cornerDelta = Phaser.Math.Angle.Wrap(outgoingAngle - incomingAngle);
+  const cornerAngle = Math.abs(cornerDelta);
+  const turnRadius = getTurnRadius(ship, Math.sign(cornerDelta));
 
   if (turnRadius <= 0 || cornerAngle <= 0.01) return 0;
 
@@ -2863,7 +2943,7 @@ function getSteeringTarget(ship) {
   const distance = Phaser.Math.Distance.Between(sprite.x, sprite.y, target.x, target.y);
   const desiredAngle = Phaser.Math.Angle.Between(sprite.x, sprite.y, target.x, target.y) + Math.PI / 2;
   const angleDelta = Phaser.Math.Angle.Wrap(desiredAngle - sprite.rotation);
-  const clearanceDistance = Math.max(getTurnRadius(ship) * 1.1, 120);
+  const clearanceDistance = Math.max(getTurnRadius(ship, Math.sign(angleDelta)) * 1.1, 120);
 
   if (ship.speed > 0 && distance < clearanceDistance && Math.abs(angleDelta) > Math.PI * 0.56) {
     const forwardAngle = sprite.rotation - Math.PI / 2;
@@ -3279,7 +3359,7 @@ function handleMapBorderTurn(ship) {
   }
 }
 
-function updateShip(ship, dt) {
+function updateShipMovement(ship, dt) {
   if (ship.sinking) {
     updateSinking(ship, dt);
     return; // sinking ships ignore steering, firing, and wake spawning
@@ -3293,6 +3373,7 @@ function updateShip(ship, dt) {
   updateSustainedAim(ship, dt);
   applyPendingWaypointSpeedOrder(ship);
   handleMapBorderTurn(ship);
+  const formationOrder = formationSystem.getFollowerOrder(ship);
 
   if (ship.moving && !ship.accelerating && !ship.slowingDown) {
     ship.movementFrameClock = (ship.movementFrameClock + dt) % (stats.wakeMovingFrames / WAKE_FPS);
@@ -3304,7 +3385,9 @@ function updateShip(ship, dt) {
     ship.slowdownFrameClock = (ship.slowdownFrameClock + dt * ship.decelTimeScale) % (stats.wakeAccelerationFrames / WAKE_FPS); // scaled
   }
 
-   if (ship.target) {
+  if (formationOrder && !ship.target?.isBoundaryTurn) {
+    updateFormationFollower(ship, formationOrder, dt);
+  } else if (ship.target) {
     const dist = Phaser.Math.Distance.Between(sprite.x, sprite.y, ship.target.x, ship.target.y);
     const stoppingDistance = (ship.speed * ship.speed) / (2 * ship.deceleration);
     const finalWaypoint = ship.waypoints.length === 0;
@@ -3423,7 +3506,13 @@ function updateShip(ship, dt) {
   if (ship.speed > 0) {
     const heading = sprite.rotation - Math.PI / 2;
     const step = ship.speed * dt;
-    if (ship.target && step >= Phaser.Math.Distance.Between(sprite.x, sprite.y, ship.target.x, ship.target.y)) {
+    if (ship.target?.isFormationWaypoint) {
+      // Formation stations move continuously; never snap to or consume them.
+      const distance = Phaser.Math.Distance.Between(sprite.x, sprite.y, ship.target.x, ship.target.y);
+      const movement = Math.min(step, distance);
+      sprite.x += Math.cos(heading) * movement;
+      sprite.y += Math.sin(heading) * movement;
+    } else if (ship.target && step >= Phaser.Math.Distance.Between(sprite.x, sprite.y, ship.target.x, ship.target.y)) {
       completeWaypoint(ship);
     } else {
       sprite.x += Math.cos(heading) * step;
@@ -3437,7 +3526,10 @@ function updateShip(ship, dt) {
     ship.pathLine.destroy();
     ship.pathLine = null;
   }
+}
 
+function updateShipAfterMovement(ship, dt) {
+  const { sprite } = ship;
   ship.selectedRing.x = sprite.x;
   ship.selectedRing.y = sprite.y;
   ship.hostileRing.setPosition(sprite.x, sprite.y);
@@ -3460,6 +3552,170 @@ function updateShip(ship, dt) {
   updateDispersionEllipseTransform(ship);
   updateShipWake(ship, dt);
   updateHealthBar(ship);
+}
+
+function updateFormationFollower(ship, order, dt) {
+  const previousSpeed = ship.speed;
+  const desiredSpeed = steerFormationFollower(ship, order, computeAvoidanceSteering(ship), dt);
+  if (ship.speed > previousSpeed && (!ship.moving || ship.slowingDown)) {
+    ship.moving = true;
+    ship.slowingDown = false;
+    ship.accelerating = true;
+    startAccelerationAnimation(ship);
+  } else if (desiredSpeed === 0 && previousSpeed > 0 && !ship.slowingDown) {
+    startSlowdownAnimation(ship);
+  }
+}
+
+// Shared by live movement and the short forecast; this touches motion state only.
+function steerFormationFollower(ship, order, avoidance, dt) {
+  ship.target = {
+    x: Phaser.Math.Clamp(order.x, 0, MAP_WIDTH),
+    y: Phaser.Math.Clamp(order.y, 0, MAP_HEIGHT),
+    isFormationWaypoint: true,
+  };
+  ship.braking = false;
+  ship.continueStraightAfterWaypoint = false;
+  const heading = order.rotation - Math.PI / 2;
+  const desiredAngle = Math.atan2(Math.sin(heading) + avoidance.y * 1.5,
+    Math.cos(heading) + avoidance.x * 1.5) + Math.PI / 2;
+  updateShipRudder(ship, Phaser.Math.Angle.Wrap(desiredAngle - ship.sprite.rotation), dt);
+  const headingError = Phaser.Math.Angle.Wrap(desiredAngle - ship.sprite.rotation);
+  // A returning ship must turn its bow onto the approach before accelerating.
+  // Braking while facing away avoids racing out of station during the turn.
+  const desiredSpeed = order.speed * (order.alignBeforeMoving ? Math.max(0, Math.cos(headingError)) : 1);
+  if (ship.speed < desiredSpeed) {
+    ship.speed = Math.min(desiredSpeed, ship.speed + ship.acceleration * dt);
+  } else {
+    ship.speed = Math.max(desiredSpeed, ship.speed - ship.deceleration * dt);
+  }
+  return desiredSpeed;
+}
+
+function calculateFormationMovementPreview(ship) {
+  const member = formationSystem.getMembership(ship);
+  const leader = member.formation.leader;
+  const clone = (original) => ({
+    ...original,
+    formationSource: original,
+    sprite: { x: original.sprite.x, y: original.sprite.y, rotation: original.sprite.rotation },
+    target: original.target ? { ...original.target, marker: undefined } : null,
+    waypoints: original.waypoints.map(({ x, y }) => ({ x, y })),
+  });
+  const state = clone(ship);
+  const leaderState = ship === leader ? state : clone(leader);
+  const station = { inStation: member.inStation, returning: member.returning };
+  const avoidance = computeAvoidanceSteering(ship);
+  const leaderAvoidance = ship === leader ? avoidance : computeAvoidanceSteering(leader);
+  const leaderSpeed = getCommandedSpeed(leader);
+  const offset = member.formation.slots.get(ship);
+  const points = [{ x: state.sprite.x, y: state.sprite.y }];
+  for (let index = 1; index <= FORMATION_PREVIEW_SECONDS / FORMATION_PREVIEW_STEP; index += 1) {
+    advanceFormationLeaderPreview(leaderState, leaderSpeed, leaderAvoidance, FORMATION_PREVIEW_STEP);
+    if (ship !== leader) {
+      const order = formationSystem.predictFollowerOrder(state, leaderState, offset, station);
+      steerFormationFollower(state, order, avoidance, FORMATION_PREVIEW_STEP);
+      const heading = state.sprite.rotation - Math.PI / 2;
+      const distance = Math.hypot(state.target.x - state.sprite.x, state.target.y - state.sprite.y);
+      const step = Math.min(state.speed * FORMATION_PREVIEW_STEP, distance);
+      state.sprite.x += Math.cos(heading) * step;
+      state.sprite.y += Math.sin(heading) * step;
+    }
+    points.push({ x: state.sprite.x, y: state.sprite.y });
+  }
+  return points;
+}
+
+function advanceFormationLeaderPreview(state, requestedSpeed, avoidance, dt) {
+  if (state.target && isCloseWaypointBehindShip(state,
+    Math.hypot(state.target.x - state.sprite.x, state.target.y - state.sprite.y))) {
+    state.target = state.waypoints.shift() || null;
+    state.braking = false;
+  }
+  if (state.target && state.waypoints.length && shouldAdvanceForTurn(state)) {
+    state.target = state.waypoints.shift();
+  }
+  let speed = state.target || state.continueStraightAfterWaypoint ? requestedSpeed : 0;
+  if (state.target) {
+    const distance = Math.hypot(state.target.x - state.sprite.x, state.target.y - state.sprite.y);
+    if (!state.waypoints.length && !state.continueStraightAfterWaypoint
+      && distance <= state.speed * state.speed / (2 * state.deceleration)) state.braking = true;
+    if (state.braking) speed = 0;
+    const target = getSteeringTarget(state);
+    const dx = target.x - state.sprite.x;
+    const dy = target.y - state.sprite.y;
+    const length = Math.hypot(dx, dy) || 1;
+    const angle = Math.atan2(dy / length + avoidance.y * 1.5, dx / length + avoidance.x * 1.5) + Math.PI / 2;
+    updateShipRudder(state, state.braking ? 0 : Phaser.Math.Angle.Wrap(angle - state.sprite.rotation), dt);
+  } else updateShipRudder(state, 0, dt);
+  state.speed = state.speed < speed
+    ? Math.min(speed, state.speed + state.acceleration * dt)
+    : Math.max(speed, state.speed - state.deceleration * dt);
+  const step = state.speed * dt;
+  if (state.target && step >= Math.hypot(state.target.x - state.sprite.x, state.target.y - state.sprite.y)) {
+    state.sprite.x = state.target.x;
+    state.sprite.y = state.target.y;
+    state.target = state.waypoints.shift() || null;
+    state.braking = false;
+  } else {
+    const heading = state.sprite.rotation - Math.PI / 2;
+    state.sprite.x += Math.cos(heading) * step;
+    state.sprite.y += Math.sin(heading) * step;
+  }
+}
+
+function updateFormationMovementPreviews(scene) {
+  formationMovementOverlay?.clear().setVisible(false);
+  formationPreviewMarkers.forEach((marker) => marker.setVisible(false));
+  let markerIndex = 0;
+  const selectedFormations = new Set(selectedShips.map((ship) =>
+    formationSystem.getMembership(ship)?.formation).filter(Boolean));
+  const camera = scene.cameras.main;
+  for (const ship of ships) {
+    const member = formationSystem.getMembership(ship);
+    if (!member || member.detached || member.formation.leader === ship
+      || ship.sinking || ship.sunk || ship.team !== TEAMS.PLAYER) continue;
+    if (!tacticalDisplayActive && !selectedFormations.has(member.formation)) continue;
+    if (!isWithinOceanEffectRange(ship.sprite.x, ship.sprite.y, camera, 200)) continue;
+    if (!formationMovementOverlay) {
+      formationMovementOverlay = scene.add.graphics().setDepth(ORDER_MARKER_DEPTH);
+      worldContainer.add(formationMovementOverlay);
+    }
+    const graphics = formationMovementOverlay;
+    const points = calculateFormationMovementPreview(ship);
+    graphics.setVisible(true).lineStyle(3 / camera.zoom, 0xffffff, 0.55);
+    graphics.beginPath().moveTo(ship.sprite.x, ship.sprite.y);
+    points.slice(1).forEach((point) => graphics.lineTo(point.x, point.y));
+    graphics.strokePath();
+    const point = points[points.length - 1];
+    if (Math.hypot(point.x - ship.sprite.x, point.y - ship.sprite.y) < 6 / camera.zoom) continue;
+    let marker = formationPreviewMarkers[markerIndex];
+    if (!marker) {
+      marker = scene.add.image(point.x, point.y, "waypoint").setDepth(ORDER_MARKER_DEPTH);
+      worldContainer.add(marker);
+      formationPreviewMarkers.push(marker);
+    }
+    marker.setPosition(point.x, point.y)
+      .setScale(waypointSize / waypointSourceSize / camera.zoom)
+      .setVisible(true);
+    markerIndex += 1;
+  }
+}
+
+function clearShipMovementOrders(ship) {
+  if (ship.target) removeWaypointMarker(ship.target);
+  ship.waypoints.forEach(removeWaypointMarker);
+  ship.target = null;
+  ship.waypoints = [];
+  ship.pendingWaypointSpeedOrder = false;
+  ship.waypointSpeedOrderDueAt = 0;
+  ship.braking = false;
+  ship.continueStraightAfterWaypoint = false;
+  ship.pathPreviewDirty = true;
+  if (ship.pathLine) {
+    ship.pathLine.destroy();
+    ship.pathLine = null;
+  }
 }
 
 function stopShipAnimation(ship) {
@@ -3652,10 +3908,11 @@ function updateSelectionOverlayVisibility() {
 }
 
 function stopSelectedShips() {
-  const commandableShips = getCommandableShips();
+  const commandableShips = formationSystem.routeOrder(getCommandableShips());
   if (commandableShips.length === 0) return;
 
   commandableShips.forEach((ship) => {
+    ship.movementStopped = true;
     ship.continueStraightAfterWaypoint = false;
     ship.pendingWaypointSpeedOrder = false;
     if (ship.target) removeWaypointMarker(ship.target);
@@ -3668,6 +3925,7 @@ function stopSelectedShips() {
 
 function calculatePredictedPath(ship, predictionStep = 1 / 12) {
   const state = {
+    formationSource: ship,
     sprite: { x: ship.sprite.x, y: ship.sprite.y, rotation: ship.sprite.rotation },
     target: ship.target ? { ...ship.target } : null,
     waypoints: ship.waypoints.map((waypoint) => ({ x: waypoint.x, y: waypoint.y })),
@@ -3678,6 +3936,9 @@ function calculatePredictedPath(ship, predictionStep = 1 / 12) {
     turnRate: ship.turnRate,
     rudderRampTimeSeconds: ship.rudderRampTimeSeconds,
     rudder: ship.rudder,
+    angularVelocity: ship.angularVelocity || 0,
+    braking: ship.braking,
+    continueStraightAfterWaypoint: ship.continueStraightAfterWaypoint,
     avoidance: ship.pathPreviewAvoidance || { x: 0, y: 0 },
   };
   const points = [];
@@ -3688,6 +3949,13 @@ function calculatePredictedPath(ship, predictionStep = 1 / 12) {
     const distance = Phaser.Math.Distance.Between(state.sprite.x, state.sprite.y, state.target.x, state.target.y);
     const finalWaypoint = state.waypoints.length === 0;
 
+    if (isCloseWaypointBehindShip(state, distance)) {
+      state.target = state.waypoints.shift() || null;
+      state.braking = false;
+      points.push({ x: state.sprite.x, y: state.sprite.y });
+      continue;
+    }
+
     if (!finalWaypoint && distance >= waypointReachLeeway && shouldAdvanceForTurn(state)) {
       state.target = state.waypoints.shift() || null;
       continue;
@@ -3697,11 +3965,13 @@ function calculatePredictedPath(ship, predictionStep = 1 / 12) {
       state.sprite.x = state.target.x;
       state.sprite.y = state.target.y;
       state.target = state.waypoints.shift() || null;
-      if (!state.target) state.speed = 0;
+      if (!state.target && !state.continueStraightAfterWaypoint) state.speed = 0;
       points.push({ x: state.sprite.x, y: state.sprite.y });
       continue;
     }
 
+    const stoppingDistance = (state.speed * state.speed) / (2 * state.deceleration);
+    if (finalWaypoint && !state.continueStraightAfterWaypoint && distance <= stoppingDistance) state.braking = true;
     const steeringTarget = getSteeringTarget(state);
     // Match live collision avoidance for the newly refreshed segment. Keeping
     // the sampled vector fixed during this forecast avoids preview jitter.
@@ -3712,13 +3982,18 @@ function calculatePredictedPath(ship, predictionStep = 1 / 12) {
     dirY = dirY / dirLength + state.avoidance.y * 1.5;
     const desiredAngle = Math.atan2(dirY, dirX) + Math.PI / 2;
     const angleDelta = Phaser.Math.Angle.Wrap(desiredAngle - state.sprite.rotation);
-    updateShipRudder(state, angleDelta, predictionStep);
-
-    const stoppingDistance = (state.speed * state.speed) / (2 * state.deceleration);
-    if (finalWaypoint && distance <= stoppingDistance) {
+    updateShipRudder(state, state.braking ? 0 : angleDelta, predictionStep);
+    if (state.braking) {
       state.speed = Math.max(0, state.speed - state.deceleration * predictionStep);
-    } else {
+      if (state.speed === 0) {
+        state.target = null;
+        points.push({ x: state.sprite.x, y: state.sprite.y });
+        break;
+      }
+    } else if (state.speed < state.maxSpeed) {
       state.speed = Math.min(state.maxSpeed, state.speed + state.acceleration * predictionStep);
+    } else {
+      state.speed = Math.max(state.maxSpeed, state.speed - state.deceleration * predictionStep);
     }
 
     const step = state.speed * predictionStep;

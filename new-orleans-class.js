@@ -3,6 +3,7 @@
 registerShipType({
   id: "new-orleans",
   label: "New Orleans-Class Cruiser",
+  shipNames: ["New Orleans", "Astoria", "Minneapolis", "Tuscaloosa", "San Francisco", "Quincy", "Vincennes"],
   shipClass: 1,
 
   textures: {

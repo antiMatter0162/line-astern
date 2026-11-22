@@ -1,4 +1,4 @@
-// Launch menu renderer with main-menu, campaign, and boot camp pages.
+// Launch menu renderer with main-menu, levels, and boot camp pages.
 window.createStartScreen = function createStartScreen(scene, onSelectMode, onExitGame) {
   console.log("levels:", window.LEVEL_DATA.levels.map((l) => l.id));
   const width = 1280;
@@ -7,7 +7,7 @@ window.createStartScreen = function createStartScreen(scene, onSelectMode, onExi
   const depth = 100;
   const objects = [];
   const mainPageObjects = [];
-  const campaignPageObjects = [];
+  const levelsPageObjects = [];
   const bootCampPageObjects = [];
   const subPageObjects = [];
   let currentPage = "main";
@@ -41,26 +41,26 @@ window.createStartScreen = function createStartScreen(scene, onSelectMode, onExi
 
   objects.push(addPixelText(scene, "LINE OF\nBATTLE", 60, 104, 6, 0xe8f4f5, depth + 3));
   const mainSubtitle = addPixelText(scene, "COMMAND THE FLEET", 62, 258, 2, 0x56d8c3, depth + 3);
-  const campaignSubtitle = addPixelText(scene, "SELECT A CHAPTER", 62, 258, 2, 0x56d8c3, depth + 3);
+  const levelsSubtitle = addPixelText(scene, "SELECT A CHAPTER", 62, 258, 2, 0x56d8c3, depth + 3);
   const bootCampSubtitle = addPixelText(scene, "SELECT A TUTORIAL", 62, 258, 2, 0x56d8c3, depth + 3);
-  objects.push(mainSubtitle, campaignSubtitle, bootCampSubtitle);
+  objects.push(mainSubtitle, levelsSubtitle, bootCampSubtitle);
   const divider = scene.add.rectangle(60, 302, 300, 2, 0x315260)
     .setOrigin(0, 0.5).setDepth(depth + 3);
   objects.push(divider);
   const mainHeading = addPixelText(scene, "MODES", 62, 337, 2, 0x8baab4, depth + 3);
-  const campaignHeading = addPixelText(scene, "CAMPAIGN", 62, 337, 2, 0x8baab4, depth + 3);
+  const levelsHeading = addPixelText(scene, "LEVELS", 62, 337, 2, 0x8baab4, depth + 3);
   const bootCampHeading = addPixelText(scene, "BOOT CAMP", 62, 337, 2, 0x8baab4, depth + 3);
-  objects.push(mainHeading, campaignHeading, bootCampHeading);
+  objects.push(mainHeading, levelsHeading, bootCampHeading);
   mainPageObjects.push(mainSubtitle, mainHeading);
-  campaignPageObjects.push(campaignSubtitle, campaignHeading);
+  levelsPageObjects.push(levelsSubtitle, levelsHeading);
   bootCampPageObjects.push(bootCampSubtitle, bootCampHeading);
 
   const menuLeft = 60;
   const menuCenterX = menuLeft + 150;
-  const campaignButton = scene.add.rectangle(menuCenterX, 399, 300, 58, 0x12584f)
+  const levelsButton = scene.add.rectangle(menuCenterX, 399, 300, 58, 0x12584f)
     .setDepth(depth + 3)
     .setInteractive({ useHandCursor: true });
-  const campaignLabel = window.PixelFont.create(scene, "> CAMPAIGN", {
+  const levelsLabel = window.PixelFont.create(scene, "> LEVELS", {
     x: menuCenterX,
     y: 399 - 7 * 4 / 2,
     pixelSize: 4,
@@ -68,16 +68,16 @@ window.createStartScreen = function createStartScreen(scene, onSelectMode, onExi
     depth: depth + 4,
     align: "center",
   });
-  campaignButton
-    .on("pointerover", () => campaignButton.setFillStyle(0x187568))
-    .on("pointerout", () => campaignButton.setFillStyle(0x12584f))
+  levelsButton
+    .on("pointerover", () => levelsButton.setFillStyle(0x187568))
+    .on("pointerout", () => levelsButton.setFillStyle(0x12584f))
     .on("pointerdown", () => {
-      currentPage = "campaign";
+      currentPage = "levels";
       chapterExpanded = false;
       refreshPage();
     });
-  objects.push(campaignButton, campaignLabel);
-  mainPageObjects.push(campaignButton, campaignLabel);
+  objects.push(levelsButton, levelsLabel);
+  mainPageObjects.push(levelsButton, levelsLabel);
 
   const bootCampButton = scene.add.rectangle(menuCenterX, 469, 300, 58, 0x12584f)
     .setDepth(depth + 3)
@@ -139,7 +139,7 @@ window.createStartScreen = function createStartScreen(scene, onSelectMode, onExi
       refreshPage();
     });
   objects.push(chapterButton, chapterLabel);
-  campaignPageObjects.push(chapterButton, chapterLabel);
+  levelsPageObjects.push(chapterButton, chapterLabel);
 
   const levelRows = Array.from({ length: 5 }, (_, index) => {
     const levelNumber = index + 1;
@@ -163,7 +163,7 @@ window.createStartScreen = function createStartScreen(scene, onSelectMode, onExi
       align: "center",
     });
     objects.push(button, label);
-    campaignPageObjects.push(button, label);
+    levelsPageObjects.push(button, label);
     return { button, label };
   });
 
@@ -192,14 +192,14 @@ window.createStartScreen = function createStartScreen(scene, onSelectMode, onExi
     refreshLevelDescription();
     const onMainPage = currentPage === "main";
     mainPageObjects.forEach((object) => object.setVisible(onMainPage));
-    const onCampaignPage = currentPage === "campaign";
-    campaignPageObjects.forEach((object) => object.setVisible(onCampaignPage));
+    const onLevelsPage = currentPage === "levels";
+    levelsPageObjects.forEach((object) => object.setVisible(onLevelsPage));
     bootCampPageObjects.forEach((object) => object.setVisible(currentPage === "boot-camp"));
     subPageObjects.forEach((object) => object.setVisible(!onMainPage));
     chapterLabel.setPixelText(`${chapterExpanded ? "v" : ">"} CHAPTER 1: PACIFIC SKIRMISH`);
     levelRows.forEach(({ button, label }) => {
-      button.setVisible(onCampaignPage && chapterExpanded);
-      label.setVisible(onCampaignPage && chapterExpanded);
+      button.setVisible(onLevelsPage && chapterExpanded);
+      label.setVisible(onLevelsPage && chapterExpanded);
     });
   }
 

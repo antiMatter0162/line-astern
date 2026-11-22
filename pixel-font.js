@@ -114,5 +114,38 @@ window.PixelFont = (() => {
     return graphics;
   }
 
-  return { create, measureLine };
+  // Use the same glyphs for HTML editor controls and canvas diagrams.
+  function draw(context, text, { x = 0, y = 0, pixelSize = 2, color = "#e8f4f5", align = "left" } = {}) {
+    const lines = String(text).toUpperCase().split("\n");
+    context.fillStyle = color;
+    lines.forEach((line, lineIndex) => {
+      const width = measureLine(line, pixelSize);
+      const left = align === "center" ? x - width / 2 : align === "right" ? x - width : x;
+      [...line].forEach((character, index) => {
+        glyphs[character]?.forEach((row, glyphY) => {
+          [...row].forEach((pixel, glyphX) => {
+            if (pixel === "1") context.fillRect(
+              Math.round(left + (index * 6 + glyphX) * pixelSize),
+              y + (lineIndex * 9 + glyphY) * pixelSize, pixelSize, pixelSize,
+            );
+          });
+        });
+      });
+    });
+  }
+
+  function createCanvas(text, options = {}) {
+    const pixelSize = options.pixelSize ?? 2;
+    const lines = String(text).split("\n");
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, ...lines.map((line) => measureLine(line, pixelSize)));
+    canvas.height = Math.max(1, (lines.length * 9 - 2) * pixelSize);
+    canvas.style.cssText = "image-rendering:pixelated;vertical-align:middle;max-width:100%";
+    canvas.setAttribute("aria-label", text);
+    canvas.setAttribute("role", "img");
+    draw(canvas.getContext("2d"), text, { ...options, pixelSize });
+    return canvas;
+  }
+
+  return { create, measureLine, draw, createCanvas };
 })();

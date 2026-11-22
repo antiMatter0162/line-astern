@@ -19,6 +19,8 @@
       "preload.js",
       "index.html",
       "enemy-ai.js",
+      "formations.js",
+      "formation-editor.js",
       "pixel-font.js",
       "start-screen.js",
       "level-template.js",
