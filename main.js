@@ -298,6 +298,8 @@ let suppressGameplayPointer = false;
 let pauseOverlayElements = null;
 let startScreenActive = true;
 let startScreenMenu = null;
+let checkLevelVictory = null;
+let levelWon = false;
 
 function spawnLevelShips(scene, level) {
   const usedNames = new Set();
@@ -372,6 +374,8 @@ function loadLevel(scene, levelId) {
   window.LEVEL_DATA.currentLevelId = levelId;
   CURRENT_LEVEL = level;
   ships = spawnLevelShips(scene, level);
+  checkLevelVictory = window.createWinConditionEvaluator(level, ships);
+  levelWon = false;
   scene.cameras.main.centerOn(MAP_WIDTH / 2, MAP_HEIGHT / 2);
 }
 
@@ -425,9 +429,39 @@ function togglePause() {
   setPaused(!gamePaused);
 }
 
+function createVictoryScreen(scene) {
+  const x = config.width / 2;
+  const y = config.height / 2;
+  const backdrop = scene.add.rectangle(x, y, config.width, config.height, 0x000000, 0.78)
+    .setDepth(60).setInteractive();
+  const title = PixelFont.create(scene, "VICTORY", {
+    x, y: y - 70, pixelSize: 5, color: 0xffffff, depth: 61, align: "center",
+  });
+  const button = scene.add.rectangle(x, y + 32, 320, 48, 0x12584f)
+    .setDepth(61).setInteractive({ useHandCursor: true });
+  const label = PixelFont.create(scene, "BACK TO CAMPAIGN", {
+    x, y: y + 22, pixelSize: 3, color: 0xffffff, depth: 62, align: "center",
+  });
+  const elements = [backdrop, title, button, label];
+  elements.forEach((element) => element.setVisible(false));
+  scene.cameras.main.ignore(elements);
+
+  scene.events.on("level-won", () => {
+    setPaused(true);
+    formationEditor?.hide();
+    elements.forEach((element) => element.setVisible(true));
+  });
+  button.on("pointerdown", () => {
+    suppressGameplayPointer = true;
+    elements.forEach((element) => element.setVisible(false));
+    startScreenActive = true;
+    startScreenMenu.show("levels");
+  });
+}
+
 function setPaused(paused) {
   gamePaused = paused;
-  pauseOverlayElements.elements.forEach((element) => element.setVisible(gamePaused));
+  pauseOverlayElements.elements.forEach((element) => element.setVisible(gamePaused && !levelWon));
 
   if (gamePaused) {
     panStart = null;
@@ -687,6 +721,7 @@ function create() {
   createFiringHud(this);
   createCannotAimHud(this);
   createPauseOverlay(this);
+  createVictoryScreen(this);
   startScreenMenu = window.createStartScreen(
     this,
     startGame,
@@ -695,7 +730,7 @@ function create() {
   this.anims.pauseAll();
   this.time.paused = true;
   this.input.keyboard.on("keydown-ESC", () => {
-    if (startScreenActive) return;
+    if (startScreenActive || levelWon) return;
     togglePause();
   });
   this.input.keyboard.on("keydown-TAB", (event) => {
@@ -1062,6 +1097,10 @@ function update(time, delta) {
   updateOceanWaves(this, dt);
   updateTacticalSymbols(this.cameras.main);
   updateShells(dt);
+  if (!levelWon && checkLevelVictory?.()) {
+    levelWon = true;
+    this.events.emit("level-won", CURRENT_LEVEL.id);
+  }
   updateAttachedHitExplosions();
   updateWakes(dt);
   updateFormationMovementPreviews(this);

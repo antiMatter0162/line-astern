@@ -2,7 +2,7 @@ window.CHAPTER_1_LEVELS.push(
   {
     id: "1-2",
     name: "Battleship Encounter",
-    description: "A battleship is steaming toward your location. Engage and destroy it.",
+    description: "The enemy battleship Arizona is steaming toward your location. Sink Arizona to win.",
 
     ships: [
       {
@@ -40,12 +40,11 @@ window.CHAPTER_1_LEVELS.push(
       
     ],
 
-    // Declarative objectives are included for the future level evaluator.
-    // Conditions are not evaluated by gameplay yet.
     winConditions: {
       operator: "all",
-      conditions: [{ type: "destroy-all-enemies" }],
+      conditions: [{ type: "defeat-enemy-ships", shipIds: ["enemy-battleship-1"] }],
     },
+    // Reserved for defeat conditions.
     loseConditions: {
       operator: "any",
       conditions: [{ type: "all-friendly-ships-lost" }],

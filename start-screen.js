@@ -286,7 +286,9 @@ window.createStartScreen = function createStartScreen(scene, onSelectMode, onExi
       hoveredLevelId = null;
       objects.forEach((object) => object.setVisible(false));
     },
-    show() {
+    show(page) {
+      if (page) currentPage = page;
+      if (page === "levels") chapterExpanded = true;
       objects.forEach((object) => object.setVisible(true));
       refreshPage();
     },

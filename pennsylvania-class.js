@@ -37,7 +37,7 @@ registerShipType({
 
   maxSpeed: 45,
   acceleration: 54,
-  deceleration: 54,
+  deceleration: 49,
   turnRate: Phaser.Math.DegToRad(10),
   rudderRampTimeSeconds: 8,
   collisionRadius: 28,

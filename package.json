@@ -24,6 +24,7 @@
       "pixel-font.js",
       "start-screen.js",
       "level-template.js",
+      "win-conditions.js",
       "campaign/**/*",
       "main.js",
       "ship-types.js",

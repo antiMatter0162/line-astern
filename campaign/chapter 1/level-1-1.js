@@ -2,7 +2,7 @@ window.CHAPTER_1_LEVELS = [
   {
     id: "1-1",
     name: "Open Water Skirmish",
-    description: "An enemy cruiser has been caught out of position. Now is the perfect opportunity to strike.",
+    description: "The enemy cruiser Astoria has been caught out of position. Sink Astoria to win.",
 
     ships: [
       {
@@ -39,12 +39,11 @@ window.CHAPTER_1_LEVELS = [
       },
     ],
 
-    // Declarative objectives are included for the future level evaluator.
-    // Conditions are not evaluated by gameplay yet.
     winConditions: {
       operator: "all",
-      conditions: [{ type: "destroy-all-enemies" }],
+      conditions: [{ type: "defeat-enemy-ships", shipIds: ["enemy-cruiser-1"] }],
     },
+    // Reserved for defeat conditions.
     loseConditions: {
       operator: "any",
       conditions: [{ type: "all-friendly-ships-lost" }],
